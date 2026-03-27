@@ -54,5 +54,26 @@
       <freejoint />
       <geom name="ball_geom" type="sphere" size="0.04" rgba="1 0 0 1" />
     </body>
+
+    <body name="bin" pos="0.0 0.5 0.0">
+      <geom name="bin_bottom" type="box" size="0.075 0.075 0.01"
+        rgba="0.4 0.4 0.4 1" pos="0 0 0.01" />
+
+      <geom name="bin_wall_left" type="box" size="0.005 0.075 0.075"
+        rgba="0.5 0.5 0.5 0.5" pos="-0.07 0.0 0.095" />
+
+      <geom name="bin_wall_right" type="box" size="0.005 0.075 0.075"
+        rgba="0.5 0.5 0.5 0.5" pos="0.07 0.0 0.095" />
+
+      <geom name="bin_wall_front" type="box" size="0.065 0.005  0.075"
+        rgba="0.5 0.5 0.5 0.5" pos="0.0 -0.07 0.095" />
+
+      <geom name="bin_wall_back" type="box" size="0.065 0.005  0.075"
+        rgba="0.5 0.5 0.5 0.5" pos="0.0 0.07 0.095" />
+
+      <site name="bin_top_center" pos="0 0 0.17" />
+
+    </body>
+
   </worldbody>
 </mujoco>

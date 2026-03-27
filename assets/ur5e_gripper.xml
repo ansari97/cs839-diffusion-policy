@@ -182,15 +182,16 @@
                   <geom material="linkgray" mesh="wrist3" class="ur5e_visual" />
                   <geom class="eef_collision" pos="0 0.08 0" quat="1 1 0 0" size="0.04 0.02" />
                   <site name="attachment_site" pos="0 0.1 0" quat="-1 1 0 0" />
+                  <site name="gripper_center" pos="0 0.25 0" />
 
                   <!-- GoPro Camera -->
-                  <geom pos="0.0 0.1 -0.05" xyaxes="-1 0 0 0 0 -1" type="box"
+                  <geom pos="0.0 0.1 0.05" xyaxes="-1 0 0 0 0 -1" type="box"
                     size="0.035 0.025 0.015"
                     material="gray" contype="0" conaffinity="0" />
                   <!-- <geom pos="0.0 0.15 0.05" quat="0.5 0.5 -0.5 -0.5" mesh="gopro"
                     class="gopro_collision" /> -->
 
-                  <camera name="gripper_camera" pos="0.0 0.125 -0.05" xyaxes="-1 0 0 0 0 -1"
+                  <camera name="gripper_camera" pos="0.0 0.125 0.05" xyaxes="-1 0 0 0 0 -1"
                     mode="fixed"
                     fovy="60" />
 
