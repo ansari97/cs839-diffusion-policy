@@ -43,7 +43,7 @@ def RRT_planning(
     i = 0
     for i in np.arange(max_iter):
 
-        print(f">> iter {i}:")
+        # print(f">> iter {i}:")
 
         # create random config (qpos)
         lower_limit = -np.pi
@@ -102,14 +102,14 @@ def RRT_planning(
 
         if np.allclose(new_qpos, goal_qpos, atol=1e-5):
             goal_found = True
-            print("goal found!")
+            # print("goal found!")
             break
 
     if goal_found:
-        print(f"RRT complete in {i} iterations!")
+        # print(f"RRT complete in {i} iterations!")
         return tree.get_final_path()
     else:
-        print(f"RRT failed!")
+        # print(f"RRT failed!")
         return None
 
     # print(tree.nodes)
@@ -254,7 +254,12 @@ def UR5eIK(
         # print(np.linalg.norm(error))
         # print(q_new)
         # input()
+
         IK_iter += 1
+
+        if IK_iter > 5000:
+            print("ERROR: couldn't converge :(")
+            return None
 
     return q_new
 
