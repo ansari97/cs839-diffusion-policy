@@ -3,6 +3,7 @@
 /venv
 /typings
 /presentation
+/data
 
 **.pyc
 /__pycache__
