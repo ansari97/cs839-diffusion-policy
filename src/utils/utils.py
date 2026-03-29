@@ -22,7 +22,7 @@ def RRT_planning(
     data.qpos[:arm_ndof] = init_qpos
     mujoco.mj_kinematics(model, data)
     mujoco.mj_collision(model, data)
-    if data.ncon > 0:
+    if is_robot_collision(model, data):
         print("ERROR: Start configuration is in collision!")
         return None
 
@@ -30,10 +30,11 @@ def RRT_planning(
     data.qpos[:arm_ndof] = goal_qpos
     mujoco.mj_kinematics(model, data)
     mujoco.mj_collision(model, data)
-    if data.ncon > 0:
+    if is_robot_collision(model, data):
         print(
-            "WARNING: Goal configuration is in collision! RRT might fail to reach exact target."
+            "ERROR: Goal configuration is in collision! RRT might fail to reach exact target."
         )
+        return None
 
     # initialize empty tree and define parameters
     tree = Tree(init_qpos)
@@ -47,7 +48,7 @@ def RRT_planning(
         # create random config (qpos)
         lower_limit = -np.pi
         upper_limit = np.pi
-        rand_qpos = np.random.uniform(low=lower_limit, high=upper_limit, size=model.nq)
+        rand_qpos = np.random.uniform(low=lower_limit, high=upper_limit, size=arm_ndof)
 
         # bias towards goal
         if i % assign_goal_iter == 0:
@@ -64,6 +65,8 @@ def RRT_planning(
         # check collision for rand_qpos or path
         diff_vector = rand_qpos - near_qpos
         vector_norm = np.linalg.norm(diff_vector)
+        if vector_norm < 1e-6:
+            continue
         unit_vector = diff_vector / vector_norm
 
         # divide path into N segments
@@ -83,7 +86,7 @@ def RRT_planning(
             mujoco.mj_collision(model, data)
 
             # if collision occurs
-            if data.ncon > 0:
+            if is_robot_collision(model, data):
                 if n == 0:
                     break_occurred = True
                     break
@@ -93,7 +96,7 @@ def RRT_planning(
             else:
                 pass
 
-        # if collision no detected, append tree
+        # if collision not detected at first new_qpos along rand_qpos (epsilon), append tree
         if not break_occurred:
             tree.append_tree(new_qpos, near_qpos_idx)
 
@@ -151,10 +154,15 @@ class Tree:
 
 
 def get_linear_trajectory(path, v_max, dt=0.001):
+    t = 0
     path = np.array(path)
     num_nodes, num_joints = path.shape
 
-    q_traj, dq_traj, ddq_traj, t = [], [], [], []
+    q_traj, dq_traj, ddq_traj = (
+        [],
+        [],
+        [],
+    )
 
     for p in range(num_nodes - 1):
         q_start = path[p]
@@ -171,10 +179,9 @@ def get_linear_trajectory(path, v_max, dt=0.001):
             q_traj.append(q)
             dq_traj.append(dq)
             ddq_traj.append(ddq)
+            t += dt
 
-    return np.array(q_traj), np.array(dq_traj), np.array(ddq_traj)
-
-    goal_rot_wrt_site = site_rot.T @ arm_goal_rot_wrt_global
+    return t, np.array(q_traj), np.array(dq_traj), np.array(ddq_traj)
 
 
 def UR5eIK(
@@ -230,12 +237,12 @@ def UR5eIK(
         U, sigma, Vh = np.linalg.svd(arm_jac)
         sigma_ = sigma.copy()
         for i in range(arm_ndof):
-            if sigma_[i] < 0.1:
+            if sigma_[i] < 1e-3:
                 sigma_[i] = 0
             else:
                 sigma_[i] = 1 / sigma[i]
 
-        print(sigma_)
+        # print(sigma_)
 
         J_inv = Vh.T @ np.diag(sigma_) @ U.T
 
@@ -243,10 +250,53 @@ def UR5eIK(
         q_new = q_new + del_q
         data.qpos[:arm_ndof] = q_new
 
-        print(site_pos)
-        print(np.linalg.norm(error))
-        print(q_new)
+        # print(site_pos)
+        # print(np.linalg.norm(error))
+        # print(q_new)
         # input()
         IK_iter += 1
 
     return q_new
+
+
+def is_robot_collision(model, data):
+    """
+    Checks if the robot has collided with the environment,
+    ignoring harmless background contacts like the ball on the table.
+    """
+    # Quick exit if there are absolutely no contacts
+    if data.ncon == 0:
+        return False
+
+    for n in range(data.ncon):
+        contact = data.contact[n]
+
+        # Get the body IDs involved in the contact
+        body1_id = model.geom_bodyid[contact.geom1]
+        body2_id = model.geom_bodyid[contact.geom2]
+
+        # Convert IDs to string names
+        name1 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body1_id)
+        name2 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body2_id)
+
+        # Define pairs of bodies that are ALLOWED to touch
+        contact_pair = {name1, name2}
+
+        if contact_pair == {"target_ball", "work_table"}:
+            continue  # This is just the ball resting on the table; ignore it!
+
+        # Optional: You can add more allowed pairs here if your gripper
+        # has self-collisions you want the RRT to ignore.
+
+        # If we reach this line, an illegal collision happened!
+        # print(f"RRT Collision detected between: {name1} and {name2}")
+        return True
+
+    return False
+
+
+def gripper_cmd(model, data, cmd):
+    if cmd == 0:
+        data.ctrl[6] = 0
+    if cmd == 1:
+        data.ctrl[6] = 100
