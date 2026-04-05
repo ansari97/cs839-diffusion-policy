@@ -4,6 +4,7 @@
 /typings
 /presentation
 /data
+/checkpoints
 /docs
 
 **.pyc
