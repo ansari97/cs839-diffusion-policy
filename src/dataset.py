@@ -7,11 +7,18 @@ from torchvision import transforms
 
 
 class UR5eDiffusionDataset(Dataset):
-    def __init__(self, data_dir, chunk_size=16):
+    def __init__(self, data_dir, chunk_size=16, num_episodes=None):
         self.data_dir = data_dir
         self.chunk_size = chunk_size
         self.episode_files = [f for f in os.listdir(data_dir) if f.endswith(".hdf5")]
         self.episode_files.sort()
+
+        # Slice the list if we only want a specific number of files
+        if num_episodes is not None:
+            self.episode_files = self.episode_files[:num_episodes]
+            print(f"DEBUG MODE: Only loading {num_episodes} episode(s)...")
+        else:
+            print(f"Loading all {len(self.episode_files)} episodes...")
 
         self.index_mapping = []
 
@@ -65,6 +72,15 @@ class UR5eDiffusionDataset(Dataset):
         # Pass the newly combined 7-number state
         qpos_tensor = torch.from_numpy(full_qpos).float()
         action_tensor = torch.from_numpy(action_chunk).float()
+
+        # normalize the qpos tensors (not the gripper)
+        qpos_tensor[:6] = qpos_tensor[:6] / 3.1415
+        qpos_tensor[6] = ((qpos_tensor[6] / 0.824) * 2.0) - 1.0
+        # When gripper closes, the value of right joint is 0.824 max
+
+        # normalize the action chunk
+        action_tensor[:, :6] = action_tensor[:, :6] / 3.1415  # for the taregt arm qpos
+        action_tensor[:, 6] = (action_tensor[:, 6] * 2.0) - 1.0  # for the gripper
 
         # --- NEW: Apply the Resize & Jitter transforms ---
         scene_tensor = self.image_transforms(scene_tensor)

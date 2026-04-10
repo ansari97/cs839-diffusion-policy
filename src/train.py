@@ -18,9 +18,18 @@ class VisionEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.resnet = resnet18(weights=ResNet18_Weights.DEFAULT)
-        self.resnet.fc = nn.Identity()  # type: ignore # ignore the last layer
+
+        # Freeze the backbone weights
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+
+        # Replace the output layer
+        self.resnet.fc = nn.Linear(512, 64)
 
     def forward(self, img):
+        # THE FIX: Force the ResNet into eval mode during the forward pass!
+        # This stops the tiny batch size from scrambling your vision features.
+        self.resnet.eval()
         return self.resnet(img)
 
 
@@ -37,44 +46,77 @@ def train():
     os.makedirs(ckpt_dir, exist_ok=True)
 
     print("Loading Dataset...")
-    dataset = UR5eDiffusionDataset(data_dir=target_data_dir, chunk_size=16)
+    dataset = UR5eDiffusionDataset(
+        data_dir=target_data_dir, chunk_size=32, num_episodes=1  # <--- CHANGE TO 32
+    )
 
     # FIX: Drastically lowered batch size from 64 to 4
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=4,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+    )
     print(f"Dataset loaded! Total valid chunks: {len(dataset)}")
 
     print("Building Neural Networks (This takes a second)...")
     vision_encoder = VisionEncoder().to(device)
 
     # THE FIX: Tell the U-Net to expect 64 steps instead of 16
+    # Set sample_size back to 16
     noise_pred_net = UNet1DModel(
-        sample_size=64,
-        in_channels=1095,
+        sample_size=32,
+        in_channels=142,
         out_channels=7,
-        down_block_types=("DownBlock1D", "DownBlock1D", "DownBlock1D"),
-        up_block_types=("UpBlock1D", "UpBlock1D", "UpBlock1D"),
-        block_out_channels=(32, 64, 128),
+        down_block_types=("DownBlock1D", "DownBlock1D"),
+        up_block_types=("UpBlock1D", "UpBlock1D"),
+        # THE FIX: Expand the channels so it isn't an information bottleneck!
+        block_out_channels=(256, 512),
     )
     noise_pred_net.to(device)
 
-    noise_scheduler = DDPMScheduler(num_train_timesteps=100)
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=100, prediction_type="sample"  # <--- CHANGED FROM "epsilon"
+    )
 
     optimizer = torch.optim.AdamW(
-        list(vision_encoder.parameters()) + list(noise_pred_net.parameters()), lr=1e-4
+        list(vision_encoder.parameters()) + list(noise_pred_net.parameters()), lr=3e-4
     )
     loss_fn = nn.MSELoss()
 
     print("Starting training")
 
-    num_epochs = 100
-    for epoch in range(num_epochs):
+    START_EPOCH = 105  # The epoch you are loading from your previous run
+    num_epochs = 500  # Your new target (200 + 300 epochs)
+    RESUME_TRAINING = False
+
+    if RESUME_TRAINING:
+        print(f"Loading saved weights from Epoch {START_EPOCH}...")
+        vision_path = os.path.join(ckpt_dir, f"vision_encoder_ep{START_EPOCH}.pth")
+        noise_path = os.path.join(ckpt_dir, f"noise_pred_net_ep{START_EPOCH}.pth")
+
+        # Load the saved dictionaries into the models
+        vision_encoder.load_state_dict(
+            torch.load(vision_path, weights_only=True, map_location=device)
+        )
+        noise_pred_net.load_state_dict(
+            torch.load(noise_path, weights_only=True, map_location=device)
+        )
+        print("Successfully loaded checkpoints!")
+    else:
+        START_EPOCH = 0  # If we aren't resuming, start at 0
+
+    for epoch in range(START_EPOCH, num_epochs):
         # FIX 5: Prevent unbound variable error
 
         start_time = time.time()
         start_clock = datetime.now().strftime("%H:%M:%S")
         print(f"\n[Epoch {epoch+1}/{num_epochs}] Started at {start_clock}...")
 
-        epoch_loss = 0.0
+        running_loss = 0.0
+        num_batches = 0
 
         for batch in dataloader:
 
@@ -85,52 +127,48 @@ def train():
             # Extract actions -> Shape: [Batch, 16 (Sequence), 7 (Channels)]
             # Extract actions and fix dimensions
             clean_actions = batch["action_chunk"].to(device)
-            clean_actions = clean_actions.transpose(1, 2)
+            clean_actions = clean_actions.transpose(1, 2)  # Shape: [Batch, 7, 16]
 
-            # THE FIX: Pad the 16-step sequence out to 64 steps
-            # (0, 48) means add 0 elements to the left side, and 48 elements to the right
-            clean_actions_padded = torch.nn.functional.pad(clean_actions, (0, 48))
-
-            # Build the 1088-dimension Condition Vector
+            # 1. Get visual and proprioceptive features
             scene_features = vision_encoder(scene_img)
             wrist_features = vision_encoder(wrist_img)
-            qpos_padded = torch.nn.functional.pad(qpos, (0, 57))
-            global_condition = torch.cat(
-                [scene_features, wrist_features, qpos_padded], dim=1
-            )
 
-            # THE FIX: Broadcast the condition vector across all 64 timesteps
-            # Shape goes from [Batch, 1088] -> [Batch, 1088, 64]
-            global_condition = global_condition.unsqueeze(-1).repeat(1, 1, 64)
+            # 2. Build the condition vector (64 + 64 + 7 = 135)
+            global_condition = torch.cat([scene_features, wrist_features, qpos], dim=1)
 
-            # Generate noise for the full 64 steps
-            noise = torch.randn(clean_actions_padded.shape, device=device)
-            bsz = clean_actions_padded.shape[0]
+            # 2. Stretch to 32 steps
+            global_condition = global_condition.unsqueeze(-1).repeat(1, 1, 32)
 
+            # 4. Generate noise for exactly 16 steps
+            noise = torch.randn(clean_actions.shape, device=device)
+            bsz = clean_actions.shape[0]
+
+            # 5. Fix dtype to torch.long (int64)
             max_steps = noise_scheduler.config["num_train_timesteps"]
             timesteps = torch.randint(
-                0, max_steps, (bsz,), device=device, dtype=torch.int32
+                0, max_steps, (bsz,), device=device, dtype=torch.long
             )
 
-            # Add Noise to the padded actions
-            noisy_actions = noise_scheduler.add_noise(clean_actions_padded, noise, timesteps)  # type: ignore
+            # 6. Add noise
+            noisy_actions = noise_scheduler.add_noise(clean_actions, noise, timesteps)
 
-            # Glue noisy actions (7) and condition (1088) together
-            # Final input shape: [Batch, 1095, 64]
+            # 7. Concatenate (135 condition + 7 action = 142 channels)
             net_input = torch.cat([noisy_actions, global_condition], dim=1)
 
-            # Predict the noise
-            noise_pred = noise_pred_net(net_input, timesteps).sample
+            # 8. Predict the CLEAN actions (x_0), not the noise!
+            action_pred = noise_pred_net(net_input, timesteps).sample
 
-            # THE FIX: Calculate Loss ONLY on our valid 16 steps!
-            # We completely ignore the 48 steps of padding we added.
-            loss = loss_fn(noise_pred[:, :, :16], noise[:, :, :16])
+            # 9. Calculate MSE against the clean_actions!
+            loss = loss_fn(action_pred, clean_actions)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            epoch_loss = loss.item()
+            running_loss += loss.item()
+            num_batches += 1
+
+        epoch_loss = running_loss / num_batches
 
         # --- NEW: Get end time and calculate duration ---
         end_time = time.time()

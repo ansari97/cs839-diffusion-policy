@@ -62,7 +62,7 @@ arm_init_qpos = np.array([0.314, -2.95, 1.35, -0.691, -1.45, 0])
 # gripper open config
 gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
-total_episodes = 30
+total_episodes = 100
 
 for episode_iter in range(total_episodes):
 
@@ -278,6 +278,12 @@ for episode_iter in range(total_episodes):
     for t in np.arange(0, 2, TIMESTEP):
         master_traj.append((last_q_traj, 0))
 
+    if any(master_traj) is None:
+        print(
+            f"episode {episode_iter} does not have valid trajectory. Continuing to next episode..."
+        )
+        continue
+
         # no need to go back to home
         # for q_traj in drop_to_drop_waypoint_traj[1]:
         #     master_traj.append((q_traj, 0))
@@ -345,8 +351,8 @@ for episode_iter in range(total_episodes):
             current_qpos = data.qpos[:arm_ndof].copy()
 
             raw_gripper_pos = data.qpos[driver_qpos_idx]
-            normalized_gripper_pos = raw_gripper_pos / 0.9
-            current_gripper_qpos = np.array([normalized_gripper_pos])
+            # normalized_gripper_pos = raw_gripper_pos / 0.9
+            current_gripper_qpos = np.array([raw_gripper_pos])
 
             # Save Action (what we commanded at this step)
             current_action = np.concatenate([target_qpos, [target_gripper]])
@@ -403,6 +409,9 @@ for episode_iter in range(total_episodes):
 
         # Save Actions
         f.create_dataset("actions", data=np.array(actions), dtype="float32")
+
+        # Save ball init position and quaternion
+        f.create_dataset("ball_init_qpos", data=ball_init_qpos)
 
 
 renderer.close()

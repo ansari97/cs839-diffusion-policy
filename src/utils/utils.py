@@ -155,6 +155,11 @@ class Tree:
 
 def get_linear_trajectory(path, v_max, dt=0.001):
     t = 0
+
+    if path is None:
+        print("ERROR: Path is a Null object!")
+        return None
+
     path = np.array(path)
     num_nodes, num_joints = path.shape
 

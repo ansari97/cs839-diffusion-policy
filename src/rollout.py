@@ -31,6 +31,9 @@ XML_PATH = PROJECT_ROOT + "/assets/main_scene.xml"
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)  # Creates the folder if it doesn't exist
 
+hdf5_filename = "episode_0.hdf5"
+ep_path = os.path.join(DATA_DIR, hdf5_filename)
+
 
 # Load the UR5e model
 model = mujoco.MjModel.from_xml_path(XML_PATH)
@@ -77,18 +80,24 @@ arm_init_qpos = np.array([0.314, -2.95, 1.35, -0.691, -1.45, 0])
 # gripper open config
 gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
-# ball initial position
-x = np.random.uniform(0.2, 0.75)
-y = np.random.uniform(0.2, 0.5)
-ball_init_pos = np.array([x, y, BALL_RADIUS])
+## ball initial position
+# x = np.random.uniform(0.2, 0.75)
+# y = np.random.uniform(0.2, 0.5)
+# ball_init_pos = np.array([x, y, BALL_RADIUS])
 
-print(f"ball init pos: {ball_init_pos}")
+# print(f"ball init pos: {ball_init_pos}")
 
-# ball initial orientation
-scipy_quat = Rotation.random().as_quat()
-mujoco_quat = np.array([scipy_quat[3], scipy_quat[0], scipy_quat[1], scipy_quat[2]])
+# # ball initial orientation
+# scipy_quat = Rotation.random().as_quat()
+# mujoco_quat = np.array([scipy_quat[3], scipy_quat[0], scipy_quat[1], scipy_quat[2]])
 
-ball_init_qpos = np.concatenate((ball_init_pos, mujoco_quat))
+# ball_init_qpos = np.concatenate((ball_init_pos, mujoco_quat))
+
+# load ball initial qpos from hdf file
+with h5py.File(ep_path, "r") as f:
+    ball_init_qpos = f["ball_init_qpos"][:]
+    ball_init_qpos = np.array(ball_init_qpos)
+print(f"Loaded exact ball position from training data: {ball_init_qpos[:3]}")
 
 # initial world config
 init_qpos = np.concatenate((arm_init_qpos, gripper_open_qpos, ball_init_qpos))
@@ -143,29 +152,36 @@ print(f"Found checkpoints! Automatically loading Epoch {highest_epoch}...")
 vision_encoder = VisionEncoder().to(device)
 vision_encoder.load_state_dict(
     torch.load(
-        os.path.join(ckpt_dir, f"vision_encoder_ep{highest_epoch}.pth")
-    )  # UPDATED
+        os.path.join(ckpt_dir, f"vision_encoder_ep{highest_epoch}.pth"),
+        weights_only=True,
+    )
 )
 vision_encoder.eval()
 
 # 2. Load U-Net
 noise_pred_net = UNet1DModel(
-    sample_size=64,
-    in_channels=1095,
+    sample_size=32,  # <-- Make sure this is 32
+    in_channels=142,
     out_channels=7,
-    down_block_types=("DownBlock1D", "DownBlock1D", "DownBlock1D"),
-    up_block_types=("UpBlock1D", "UpBlock1D", "UpBlock1D"),
-    block_out_channels=(32, 64, 128),
+    down_block_types=("DownBlock1D", "DownBlock1D"),
+    up_block_types=("UpBlock1D", "UpBlock1D"),
+    block_out_channels=(256, 512),  # <-- UPDATE TO WIDER CHANNELS
 ).to(device)
 noise_pred_net.load_state_dict(
     torch.load(
-        os.path.join(ckpt_dir, f"noise_pred_net_ep{highest_epoch}.pth")
-    )  # UPDATED
+        os.path.join(ckpt_dir, f"noise_pred_net_ep{highest_epoch}.pth"),
+        weights_only=True,
+    )
 )
 noise_pred_net.eval()
 
 # 3. Setup Scheduler and Resize Tool
-noise_scheduler = DDPMScheduler(num_train_timesteps=100)
+noise_scheduler = DDPMScheduler(
+    num_train_timesteps=100,
+    beta_schedule="squaredcos_cap_v2",
+    clip_sample=True,
+    prediction_type="sample",  # <-- CRITICAL ADDITION
+)
 resize_transform = transforms.Resize((224, 224), antialias=True)
 
 print("Starting simulation!")
@@ -173,91 +189,119 @@ t = 0
 
 MAX_TIME = 30  # seconds
 
-while t < MAX_TIME:
-    # loop until max time reached; improve later by looking at goal reached or failure or max steps
+with mujoco.viewer.launch_passive(
+    model, data, show_left_ui=False, show_right_ui=False
+) as viewer:
+    while t < MAX_TIME:
+        # loop until max time reached; improve later by looking at goal reached or failure or max steps
 
-    # get current robot state 7 element
-    arm_qpos = data.qpos[:arm_ndof].copy()
-    gripper_qpos = data.qpos[driver_joint_id].copy()
-    robot_qpos = np.concatenate((arm_qpos, [gripper_qpos]))
+        # get current robot state 7 element
+        arm_qpos = data.qpos[:arm_ndof].copy()
+        arm_qpos = arm_qpos / 3.1415  # normalize
 
-    # get current camera images; at what freq?
-    # Render Scene Camera
-    renderer.update_scene(data, camera=SCENE_CAM_NAME)
-    scene_img = renderer.render()  # Returns RGB numpy array
+        gripper_qpos = data.qpos[driver_joint_id].copy()
+        gripper_qpos = ((gripper_qpos / 0.824) * 2.0) - 1.0  # normalize
 
-    # Render Gripper Camera
-    renderer.update_scene(data, camera=WRIST_CAM_NAME)
-    wrist_img = renderer.render()  # Returns RGB numpy array
+        robot_qpos = np.concatenate((arm_qpos, [gripper_qpos]))
 
-    # add padding to robot state
-    robot_qpos = torch.from_numpy(robot_qpos).float().unsqueeze(0).to(device)
-    robot_qpos_padded = torch.nn.functional.pad(robot_qpos, (0, 57))
+        # get current camera images; at what freq?
+        # Render Scene Camera
+        renderer.update_scene(data, camera=SCENE_CAM_NAME)
+        scene_img = renderer.render()  # Returns RGB numpy array
 
-    # transform images by resizing, passing through visual encoder, normalizing channels
-    scene_tensor = torch.from_numpy(np.moveaxis(scene_img, -1, 0)).float() / 255.0
-    wrist_tensor = torch.from_numpy(np.moveaxis(wrist_img, -1, 0)).float() / 255.0
+        # Render Gripper Camera
+        renderer.update_scene(data, camera=WRIST_CAM_NAME)
+        wrist_img = renderer.render()  # Returns RGB numpy array
 
-    scene_tensor = scene_tensor.unsqueeze(0).to(device)
-    wrist_tensor = wrist_tensor.unsqueeze(0).to(device)
+        # add padding to robot state
+        robot_qpos = torch.from_numpy(robot_qpos).float().unsqueeze(0).to(device)
+        # robot_qpos_padded = torch.nn.functional.pad(robot_qpos, (0, 57))
 
-    scene_tensor = resize_transform(scene_tensor)
-    wrist_tensor = resize_transform(wrist_tensor)
+        # transform images by resizing, passing through visual encoder, normalizing channels
+        scene_tensor = torch.from_numpy(np.moveaxis(scene_img, -1, 0)).float() / 255.0
+        wrist_tensor = torch.from_numpy(np.moveaxis(wrist_img, -1, 0)).float() / 255.0
 
-    # pass scene and wrist tensors through the CNN
-    with torch.no_grad():
-        scene_features = vision_encoder(scene_tensor)
-        wrist_features = vision_encoder(wrist_tensor)
+        scene_tensor = scene_tensor.unsqueeze(0).to(device)
+        wrist_tensor = wrist_tensor.unsqueeze(0).to(device)
 
-    # concatenate to form global condition
-    global_condition = torch.cat(
-        [scene_features, wrist_features, robot_qpos_padded], dim=1
-    )
-    # broadcast condition for 64 steps ahead
-    global_condition = global_condition.unsqueeze(-1).repeat(1, 1, 64)
+        scene_tensor = resize_transform(scene_tensor)
+        wrist_tensor = resize_transform(wrist_tensor)
 
-    # feed into nn
-    # Start with pure random noise -> [1, 7, 64]
-    noisy_action = torch.randn((1, 7, 64), device=device)
+        # pass scene and wrist tensors through the CNN
+        with torch.no_grad():
+            scene_features = vision_encoder(scene_tensor)
+            wrist_features = vision_encoder(wrist_tensor)
 
-    # Tell the scheduler we are doing inference
-    noise_scheduler.set_timesteps(100)
+        # concatenate to form global condition
+        global_condition = torch.cat(
+            [scene_features, wrist_features, robot_qpos], dim=1
+        )
+        # broadcast condition for 64 steps ahead
+        global_condition = global_condition.unsqueeze(-1).repeat(1, 1, 32)
 
-    # The Denoising Loop
-    with torch.no_grad():
+        # feed into nn
+        # Start with pure random noise -> [1, 7, 64]
+        noisy_action = torch.randn((1, 7, 32), device=device)
+
+        # Tell the scheduler we are doing inference
+        noise_scheduler.set_timesteps(100)
+
+        # The Denoising Loop
+
         for k in noise_scheduler.timesteps:
             # 1. Glue noise and condition together
             net_input = torch.cat([noisy_action, global_condition], dim=1)
 
-            # 2. Ask U-Net to guess the noise
-            noise_pred = noise_pred_net(net_input, k).sample
+            with torch.no_grad():
+                # 2. Ask U-Net to guess the noise
+                predicted_clean_action = noise_pred_net(net_input, k).sample
 
             # 3. Mathematically subtract a tiny bit of that noise
-            noisy_action = noise_scheduler.step(noise_pred, k, noisy_action).prev_sample
+            noisy_action = noise_scheduler.step(
+                model_output=predicted_clean_action, timestep=k, sample=noisy_action
+            ).prev_sample
 
-    # At the end of the loop, noisy_action is perfectly clean!
-    # Pull it off the GPU and flip the sequence back to [64, 7]
-    clean_actions = noisy_action.squeeze(0).cpu().numpy()
-    clean_actions = clean_actions.transpose(1, 0)
+        # At the end of the loop, noisy_action is perfectly clean!
+        # Pull it off the GPU and flip the sequence back to [64, 7]
+        clean_actions = noisy_action.squeeze(0).cpu().numpy()
+        clean_actions = clean_actions.transpose(1, 0)
 
-    # ACTION CHUNKING: We generated 64 steps, but let's only execute the first 8
-    # before we stop and take a new picture!
-    action_chunk = clean_actions[:8]
+        # ACTION CHUNKING: We generated 64 steps, but let's only execute the first 8
+        # before we stop and take a new picture!
+        action_chunk = clean_actions.copy()
 
-    for action in action_chunk:
-        # loop for next 16 timesteps
-        data.ctrl[:arm_ndof] = action[:arm_ndof]
-        gripper_cmd(model, data, action[-1])
+        # normalize
+        action_chunk[:, :6] = action_chunk[:, :6] * 3.1415
+        action_chunk[:, 6] = (action_chunk[:, 6] + 1.0) / 2.0
 
-        mujoco.mj_step(model, data)
-        t += TIMESTEP
+        for action in action_chunk:
+            # loop for next 16 timesteps
+            print(f"time: {t}")
+            print(f"ctrl: {data.ctrl}")
+            data.ctrl[:arm_ndof] = action[:arm_ndof]
+            binary_grip = 1.0 if action[-1] > 0.5 else 0.0
+            gripper_cmd(model, data, binary_grip)
 
-        # live monitor
-        cv2.imshow("Scene Camera", cv2.cvtColor(scene_img, cv2.COLOR_RGB2BGR))
-        cv2.imshow("Wrist Camera", cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR))
+            # get current camera images; at what freq?
+            # Render Scene Camera
+            # renderer.update_scene(data, camera=SCENE_CAM_NAME)
+            # scene_img = renderer.render()  # Returns RGB numpy array
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            # # Render Gripper Camera
+            # renderer.update_scene(data, camera=WRIST_CAM_NAME)
+            # wrist_img = renderer.render()  # Returns RGB numpy array
+
+            mujoco.mj_step(model, data)
+            t += TIMESTEP
+
+            viewer.sync()
+
+            # # live monitor
+            # cv2.imshow("Scene Camera", cv2.cvtColor(scene_img, cv2.COLOR_RGB2BGR))
+            # cv2.imshow("Wrist Camera", cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR))
+
+            # if cv2.waitKey(1) & 0xFF == ord("q"):
+            #     break
 
     # loop end
 
