@@ -31,7 +31,7 @@ XML_PATH = PROJECT_ROOT + "/assets/main_scene.xml"
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)  # Creates the folder if it doesn't exist
 
-hdf5_filename = "episode_1.hdf5"
+hdf5_filename = "episode_0.hdf5"
 ep_path = os.path.join(DATA_DIR, hdf5_filename)
 
 
@@ -56,14 +56,13 @@ SCENE_CAM_NAME = "scene_camera"
 WRIST_CAM_NAME = "wrist_camera"
 
 # constants
-ball_geom_id = model.geom("ball_geom").id
-BALL_RADIUS = model.geom_size[ball_geom_id][0]
-
-driver_joint_id = model.joint("right_driver_joint").id
-driver_qpos_idx = model.jnt_qposadr[driver_joint_id]
+greenzone_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "green_zone")
+greenzone_geom_id = model.geom("green_zone_cyl").id
+GREENZONE_CYL_HALF_HEIGHT = model.geom_size[greenzone_geom_id][1]
 
 # arm parameters
 arm_ndof = 6
+gripper_ndof = 6
 
 # reset model
 mujoco.mj_resetData(model, data)
@@ -93,16 +92,17 @@ gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
 # ball_init_qpos = np.concatenate((ball_init_pos, mujoco_quat))
 
-# load ball initial qpos from hdf file
+# load greenzone initial pos from hdf file
 with h5py.File(ep_path, "r") as f:
-    ball_init_qpos = f["ball_init_qpos"][:]
-    ball_init_qpos = np.array(ball_init_qpos)
-print(f"Loaded exact ball position from training data: {ball_init_qpos[:3]}")
+    greenzone_cyl_init_pos = f["greenzone_cyl_init_pos"][:]
+    greenzone_cyl_init_pos = np.array(greenzone_cyl_init_pos)
+print(f"Loaded exact zone position from training data: {greenzone_cyl_init_pos[:3]}")
 
 # initial world config
-init_qpos = np.concatenate((arm_init_qpos, gripper_open_qpos, ball_init_qpos))
+init_qpos = np.concatenate((arm_init_qpos, gripper_open_qpos))
 
 # assign to initial position of the simulator
+model.body_pos[greenzone_body_id] = greenzone_cyl_init_pos
 data.qpos = init_qpos
 mujoco.mj_forward(model, data)
 
@@ -167,12 +167,13 @@ wrist_encoder.eval()
 
 # 2. Load U-Net
 noise_pred_net = UNet1DModel(
-    sample_size=32,  # <-- Make sure this is 32
-    in_channels=277,
-    out_channels=7,
+    sample_size=32,
+    in_channels=274,
+    out_channels=6,
     down_block_types=("DownBlock1D", "DownBlock1D"),
     up_block_types=("UpBlock1D", "UpBlock1D"),
-    block_out_channels=(256, 512),  # <-- UPDATE TO WIDER CHANNELS
+    # THE FIX: Expand the channels so it isn't an information bottleneck!
+    block_out_channels=(256, 512),
 ).to(device)
 noise_pred_net.load_state_dict(
     torch.load(
@@ -210,11 +211,6 @@ with mujoco.viewer.launch_passive(
         arm_qpos = data.qpos[:arm_ndof].copy()
         arm_qpos = arm_qpos / 3.1415  # normalize
 
-        gripper_qpos = data.qpos[driver_joint_id].copy()
-        gripper_qpos = ((gripper_qpos / 0.824) * 2.0) - 1.0  # normalize
-
-        robot_qpos = np.concatenate((arm_qpos, [gripper_qpos]))
-
         # get current camera images; at what freq?
         # Render Scene Camera
         renderer.update_scene(data, camera=SCENE_CAM_NAME)
@@ -225,7 +221,7 @@ with mujoco.viewer.launch_passive(
         wrist_img = renderer.render()  # Returns RGB numpy array
 
         # add padding to robot state
-        robot_qpos = torch.from_numpy(robot_qpos).float().unsqueeze(0).to(device)
+        robot_qpos = torch.from_numpy(arm_qpos).float().unsqueeze(0).to(device)
         # robot_qpos_padded = torch.nn.functional.pad(robot_qpos, (0, 57))
 
         # transform images by resizing, passing through visual encoder, normalizing channels
@@ -267,7 +263,7 @@ with mujoco.viewer.launch_passive(
 
         # feed into nn
         # Start with pure random noise -> [1, 7, 64]
-        noisy_action = torch.randn((1, 7, 32), device=device)
+        noisy_action = torch.randn((1, 6, 32), device=device)
 
         # Tell the scheduler we are doing inference
         noise_scheduler.set_timesteps(100)
@@ -294,19 +290,17 @@ with mujoco.viewer.launch_passive(
 
         # ACTION CHUNKING: We generated 64 steps, but let's only execute the first 8
         # before we stop and take a new picture!
-        action_chunk = clean_actions[:8]
+        action_chunk = clean_actions[:16]
 
         # normalize
-        action_chunk[:, :6] = action_chunk[:, :6] * 3.1415
-        action_chunk[:, 6] = (action_chunk[:, 6] + 1.0) / 2.0
+        action_chunk = action_chunk * 3.1415
 
         for action in action_chunk:
             # loop for next 16 timesteps
             print(f"time: {t}")
             print(f"ctrl: {data.ctrl}")
-            data.ctrl[:arm_ndof] = action[:arm_ndof]
-            binary_grip = 1.0 if action[-1] > 0.5 else 0.0
-            gripper_cmd(model, data, binary_grip)
+            data.ctrl[:arm_ndof] = action
+            data.ctrl[arm_ndof:gripper_ndof] = 0
 
             # get current camera images; at what freq?
             # Render Scene Camera
@@ -316,6 +310,11 @@ with mujoco.viewer.launch_passive(
             # # Render Gripper Camera
             # renderer.update_scene(data, camera=WRIST_CAM_NAME)
             # wrist_img = renderer.render()  # Returns RGB numpy array
+
+            # to match the 10Hz frequency of your training data!
+            for _ in range(STEPS_PER_RECORD):
+                mujoco.mj_step(model, data)
+                t += TIMESTEP
 
             mujoco.mj_step(model, data)
             t += TIMESTEP

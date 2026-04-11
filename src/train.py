@@ -81,8 +81,8 @@ def train():
     # Set sample_size back to 16
     noise_pred_net = UNet1DModel(
         sample_size=32,
-        in_channels=277,
-        out_channels=7,
+        in_channels=274,
+        out_channels=6,
         down_block_types=("DownBlock1D", "DownBlock1D"),
         up_block_types=("UpBlock1D", "UpBlock1D"),
         # THE FIX: Expand the channels so it isn't an information bottleneck!

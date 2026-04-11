@@ -5,12 +5,16 @@ import mujoco.viewer
 
 from utils.utils import *
 
+from utils.utils_RRT import PathPlanning
+
 from scipy.spatial.transform import Rotation
 
 import os
 
 import cv2
 import h5py
+
+import time
 
 # directories
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,15 +44,13 @@ SCENE_CAM_NAME = "scene_camera"
 WRIST_CAM_NAME = "wrist_camera"
 
 # constants
-ball_geom_id = model.geom("ball_geom").id
-BALL_RADIUS = model.geom_size[ball_geom_id][0]
-
-driver_joint_id = model.joint("right_driver_joint").id
-driver_qpos_idx = model.jnt_qposadr[driver_joint_id]
+greenzone_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "green_zone")
+greenzone_geom_id = model.geom("green_zone_cyl").id
+GREENZONE_CYL_HALF_HEIGHT = model.geom_size[greenzone_geom_id][1]
 
 # arm parameters
 arm_ndof = 6
-
+gripper_ndof = 6
 
 # initial position
 # # used for IK initial position guess
@@ -63,8 +65,9 @@ arm_init_qpos = np.array([0.314, -2.95, 1.35, -0.691, -1.45, 0])
 gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
 total_episodes = 100
+episode_iter = 0
 
-for episode_iter in range(total_episodes):
+while episode_iter < total_episodes:
 
     # reset model
     mujoco.mj_resetData(model, data)
@@ -76,27 +79,25 @@ for episode_iter in range(total_episodes):
     obs_gripper_qpos = []
     actions = []
 
-    step_counter = 0
-
-    # ball initial position
+    # randomize greenzone position
     x = np.random.uniform(0.2, 0.75)
-    y = np.random.uniform(0.2, 0.5)
-    ball_init_pos = np.array([x, y, BALL_RADIUS])
+    y = np.random.uniform(0.2, 0.75)
+    greenzone_cyl_init_pos = np.array([x, y, GREENZONE_CYL_HALF_HEIGHT])
 
-    # print(f"ball rad: {BALL_RADIUS}")
     print(f"episode: {episode_iter}")
-    print(f"ball init pos: {ball_init_pos}")
+    print(f"target zone init pos: {greenzone_cyl_init_pos}")
 
     # ball initial orientation
-    scipy_quat = Rotation.random().as_quat()
-    mujoco_quat = np.array([scipy_quat[3], scipy_quat[0], scipy_quat[1], scipy_quat[2]])
-
-    ball_init_qpos = np.concatenate((ball_init_pos, mujoco_quat))
+    # greenzone_cyl_init_quat = np.array([1, 0, 0, 0])
+    # greenzone_init_qpos = np.concatenate(
+    #     (greenzone_cyl_init_pos, greenzone_cyl_init_quat)
+    # )
 
     # initial world config
-    init_qpos = np.concatenate((arm_init_qpos, gripper_open_qpos, ball_init_qpos))
+    init_qpos = np.concatenate((arm_init_qpos, gripper_open_qpos))
 
     # assign to initial position of the simulator
+    model.body_pos[greenzone_body_id] = greenzone_cyl_init_pos
     data.qpos = init_qpos
     mujoco.mj_forward(model, data)
 
@@ -108,7 +109,16 @@ for episode_iter in range(total_episodes):
     ## inverse kinematics for the ball position
 
     # goal position
-    arm_goal_pos = ball_init_pos.copy()
+    arm_goal_pos = greenzone_cyl_init_pos.copy()
+    arm_goal_pos[2] += GREENZONE_CYL_HALF_HEIGHT + 0.10  # 10cm above the target zone
+
+    # we create a cube of 5cm and accept anything within that sphere
+    cube_side = 0.05
+    greenzone_allowance_cube = np.random.uniform(0, cube_side, size=3)
+
+    arm_goal_pos += greenzone_allowance_cube
+
+    # we can also randomize this to be between 0 and 10cm
     arm_goal_rot_wrt_global = np.array(
         [
             [1, 0, 0],
@@ -117,226 +127,56 @@ for episode_iter in range(total_episodes):
         ]
     )
 
-    # waypoints/goals
-    arm_goal_waypoint_pos = ball_init_pos.copy()
-    arm_goal_waypoint_pos[2] += 0.1
-
-    # print(ball_init_pos)
-    # print(arm_goal_waypoint_pos)
-
-    # drop site
-    drop_site_name = "bin_top_center"
-    drop_site_id = model.site(drop_site_name).id
-    # no need for mj_forward since drop site does not move
-    arm_drop_pos = data.site(drop_site_id).xpos.copy()  # orientation is the same
-
-    arm_drop_waypoint_pos = arm_drop_pos.copy()
-    arm_drop_waypoint_pos[2] += 0.1
-
-    # print(f"arm_drop_pos: {arm_drop_pos}")
-    # print(arm_drop_waypoint_pos)
-
-    # Do IK and get trajectories
-    arm_goal_waypoint_qpos = UR5eIK(
-        model,
-        data,
-        "gripper_center",
-        arm_home_qpos,
-        arm_goal_waypoint_pos,
-        arm_goal_rot_wrt_global,
-    )
-
-    # input("IK complete for goal waypoint")
-
     arm_goal_qpos = UR5eIK(
         model,
         data,
         "gripper_center",
-        arm_goal_waypoint_qpos,
+        arm_home_qpos,
         arm_goal_pos,
         arm_goal_rot_wrt_global,
     )
 
-    # input("IK complete for goal")
-
-    arm_drop_waypoint_qpos = UR5eIK(
-        model,
-        data,
-        "gripper_center",
-        arm_goal_qpos,
-        arm_drop_waypoint_pos,
-        arm_goal_rot_wrt_global,
-    )
-
-    # input("IK complete for drop waypoint")
-
-    arm_drop_qpos = UR5eIK(
-        model,
-        data,
-        "gripper_center",
-        arm_drop_waypoint_qpos,
-        arm_drop_pos,
-        arm_goal_rot_wrt_global,
-    )
-
-    # input("IK complete for drop")
-
-    ## Do RRT to ensure no collisions
-    # create trajectories
-    # initial position to goal waypoint
-    init_to_goal_waypoint_tree = RRT_planning(
-        model, data, arm_init_qpos, arm_goal_waypoint_qpos, 20, 50000, 0.2
-    )
-
-    init_to_goal_waypoint_traj = get_linear_trajectory(
-        init_to_goal_waypoint_tree, dt=TIMESTEP, v_max=0.25
-    )
-
-    # goal waypoint to goal
-    goal_waypoint_to_goal_tree = RRT_planning(
-        model, data, arm_goal_waypoint_qpos, arm_goal_qpos, 20, 50000, 0.2
-    )
-
-    goal_waypoint_to_goal_traj = get_linear_trajectory(
-        goal_waypoint_to_goal_tree, dt=TIMESTEP, v_max=0.25
-    )
-
-    # goal to drop waypoint
-    goal_to_drop_waypoint_tree = RRT_planning(
-        model, data, arm_goal_qpos, arm_drop_waypoint_qpos, 20, 50000, 0.2
-    )
-
-    goal_to_drop_waypoint_traj = get_linear_trajectory(
-        goal_to_drop_waypoint_tree, dt=TIMESTEP, v_max=0.25
-    )
-
-    # drop waypoint to drop
-    drop_waypoint_to_drop_tree = RRT_planning(
-        model, data, arm_drop_waypoint_qpos, arm_drop_qpos, 20, 50000, 0.2
-    )
-
-    drop_waypoint_to_drop_traj = get_linear_trajectory(
-        drop_waypoint_to_drop_tree, dt=TIMESTEP, v_max=0.25
-    )
-
-    # drop to drop waypoint
-    drop_to_drop_waypoint_tree = RRT_planning(
-        model, data, arm_drop_qpos, arm_drop_waypoint_qpos, 20, 50000, 0.2
-    )
-
-    drop_to_drop_waypoint_traj = get_linear_trajectory(
-        drop_to_drop_waypoint_tree, dt=TIMESTEP, v_max=0.25
-    )
-
-    # drop waypoint to initial position
-    drop_waypoint_to_init_tree = RRT_planning(
-        model, data, arm_drop_waypoint_qpos, arm_init_qpos, 20, 50000, 0.2
-    )
-
-    drop_waypoint_to_init_traj = get_linear_trajectory(
-        drop_waypoint_to_init_tree, dt=TIMESTEP, v_max=0.25
-    )
-
-    ## create a single list of paths and gripper commands
-    master_traj = []
-
-    for q_traj in init_to_goal_waypoint_traj[1]:
-        master_traj.append((q_traj, 0))
-
-    last_q_traj = master_traj[-1][0]
-
-    # wait for some time
-    for t in np.arange(0, 1, TIMESTEP):
-        master_traj.append((last_q_traj, 0))
-
-    for q_traj in goal_waypoint_to_goal_traj[1]:
-        master_traj.append((q_traj, 0))
-
-    last_q_traj = master_traj[-1][0]
-
-    # wait for some time
-    for t in np.arange(0, 1, TIMESTEP):
-        master_traj.append((last_q_traj, 0))
-
-    # pinch for 2 seconds
-    for t in np.arange(0, 2, TIMESTEP):
-        master_traj.append((last_q_traj, 1))
-
-    for q_traj in goal_to_drop_waypoint_traj[1]:
-        master_traj.append((q_traj, 1))
-
-    for q_traj in drop_waypoint_to_drop_traj[1]:
-        master_traj.append((q_traj, 1))
-
-    last_q_traj = master_traj[-1][0]
-
-    # wait for some time
-    for t in np.arange(0, 2, TIMESTEP):
-        master_traj.append((last_q_traj, 1))
-
-    # drop pose for 2 seconds
-    for t in np.arange(0, 2, TIMESTEP):
-        master_traj.append((last_q_traj, 0))
-
-    if any(master_traj) is None:
-        print(
-            f"episode {episode_iter} does not have valid trajectory. Continuing to next episode..."
-        )
+    if arm_goal_qpos is None:
+        print("IK failed!")
         continue
 
-        # no need to go back to home
-        # for q_traj in drop_to_drop_waypoint_traj[1]:
-        #     master_traj.append((q_traj, 0))
+    joints = [
+        "shoulder_pan_joint",
+        "shoulder_lift_joint",
+        "elbow_joint",
+        "wrist_1_joint",
+        "wrist_2_joint",
+        "wrist_3_joint",
+    ]
 
-        # for q_traj in drop_waypoint_to_init_traj[1]:
-        #     master_traj.append((q_traj, 0))
+    goal_qpos = np.concatenate((arm_goal_qpos, gripper_open_qpos))
 
-        # print(master_traj)
+    # print(init_qpos)
+    # print(goal_qpos)
 
-        # launch viewer
-        # with mujoco.viewer.launch_passive(
-        #     model, data, show_left_ui=False, show_right_ui=False
-        # ) as viewer:
+    init_to_goal_traj = PathPlanning(model, data, joints, init_qpos, goal_qpos, 0.1)
 
-        #     # Set camera angle
-        #     viewer.cam.azimuth = 90  # Azimuth angle (degrees)
-        #     viewer.cam.elevation = -30  # Elevation angle (degrees)
-        #     viewer.cam.distance = 4  # Distance from the lookat point (meters)
-        #     viewer.cam.lookat[:] = [
-        #         0.9,
-        #         0.9,
-        #         0.25,
-        #     ]  # Point the camera is looking at [x, y, z]
+    if init_to_goal_traj is None:
+        print("no path returned!")
+        continue
 
-        # 1. Get the integer ID of your custom camera from the XML
-        # (Replace "your_camera_name" with whatever you named it in main_scene.xml)
-        # camera_id = model.camera("scene_camera").id
+    # print(init_to_goal_traj)
+    # input()
 
-        # # 2. Tell the viewer to switch to "Fixed" mode
-        # viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-
-        # # 3. Lock the viewer to your specific camera ID
-        # viewer.cam.fixedcamid = camera_id
-
-        # viewer.full_screen = True
-        # model.vis.quality.offsamples = 8
-
-        # # start simulation
+    # print(init_to_goal_traj.shape)
 
     print("Starting simulation!")
     t = 0
+    step_counter = 0
 
-    for i in range(len(master_traj)):
-        target_qpos = master_traj[i][0]
-        target_gripper = master_traj[i][1]
+    # with mujoco.viewer.launch_passive(
+    #     model, data, show_left_ui=False, show_right_ui=False
+    # ) as viewer:
+    #     viewer.sync()
 
-        data.ctrl[:arm_ndof] = target_qpos
-        gripper_cmd(model, data, target_gripper)
-
-        mujoco.mj_step(model, data)
-        t += TIMESTEP
-
-        # viewer.sync()
+    for traj in init_to_goal_traj:
+        target_arm_qpos = traj[:arm_ndof]
+        target_gripper_qpos = 0
 
         if step_counter % STEPS_PER_RECORD == 0:
             # Render Scene Camera
@@ -350,18 +190,13 @@ for episode_iter in range(total_episodes):
             # Get physical states
             current_qpos = data.qpos[:arm_ndof].copy()
 
-            raw_gripper_pos = data.qpos[driver_qpos_idx]
-            # normalized_gripper_pos = raw_gripper_pos / 0.9
-            current_gripper_qpos = np.array([raw_gripper_pos])
-
             # Save Action (what we commanded at this step)
-            current_action = np.concatenate([target_qpos, [target_gripper]])
+            current_action = target_arm_qpos.copy()
 
             # Append to buffers
             obs_scene_imgs.append(scene_img)
             obs_wrist_imgs.append(wrist_img)
             obs_qpos.append(current_qpos)
-            obs_gripper_qpos.append(current_gripper_qpos)
             actions.append(current_action)
 
             # live monitor
@@ -371,7 +206,25 @@ for episode_iter in range(total_episodes):
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
+        if np.random.rand() < 0.10:
+            # Create a small noise vector (e.g., +/- 0.02 radians)
+            noise = np.random.uniform(-0.02, 0.02, size=arm_ndof)
+            noisy_qpos = target_arm_qpos + noise
+
+            # Send the noisy command to the physics engine
+            data.ctrl[:arm_ndof] = noisy_qpos
+        else:
+            # Send the perfect command
+            data.ctrl[:arm_ndof] = target_arm_qpos
+
+        data.ctrl[arm_ndof:gripper_ndof] = target_gripper_qpos
+
+        mujoco.mj_step(model, data)
+        # viewer.sync()
+
+        t += TIMESTEP
         step_counter += 1
+        # time.sleep(0.01)
 
     # Cleanup OpenCV windows
     cv2.destroyAllWindows()
@@ -403,15 +256,13 @@ for episode_iter in range(total_episodes):
 
         # Save States (float32 is standard for policy inputs)
         obs_grp.create_dataset("qpos", data=np.array(obs_qpos), dtype="float32")
-        obs_grp.create_dataset(
-            "gripper_qpos", data=np.array(obs_gripper_qpos), dtype="float32"
-        )
 
         # Save Actions
         f.create_dataset("actions", data=np.array(actions), dtype="float32")
 
         # Save ball init position and quaternion
-        f.create_dataset("ball_init_qpos", data=ball_init_qpos)
+        f.create_dataset("greenzone_cyl_init_pos", data=greenzone_cyl_init_pos)
 
+    episode_iter += 1
 
 renderer.close()

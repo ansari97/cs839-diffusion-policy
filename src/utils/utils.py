@@ -253,6 +253,10 @@ def UR5eIK(
 
         del_q = J_inv @ K @ error
         q_new = q_new + del_q
+
+        # wrap
+        q_new = (q_new + np.pi) % (2 * np.pi) - np.pi
+
         data.qpos[:arm_ndof] = q_new
 
         # print(site_pos)
@@ -262,7 +266,7 @@ def UR5eIK(
 
         IK_iter += 1
 
-        if IK_iter > 5000:
+        if IK_iter > 50000:
             print("ERROR: couldn't converge :(")
             return None
 

@@ -39,7 +39,7 @@ class UR5eDiffusionDataset(Dataset):
         self.image_transforms = transforms.Compose(
             [
                 transforms.Resize((224, 224), antialias=True),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, hue=0.05),
+                # transforms.ColorJitter(brightness=0.2, contrast=0.2, hue=0.05),
             ]
         )
 
@@ -67,13 +67,6 @@ class UR5eDiffusionDataset(Dataset):
             arm_qpos_0 = f["observations/qpos"][idx_0]  # type: ignore
             arm_qpos_1 = f["observations/qpos"][idx_1]  # type: ignore
 
-            gripper_qpos_0 = f["observations/gripper_qpos"][idx_0]  # type: ignore
-            gripper_qpos_1 = f["observations/gripper_qpos"][idx_1]  # type: ignore
-
-            # Glue them together into a single 7-number array!
-            full_qpos_0 = np.concatenate([arm_qpos_0, gripper_qpos_0])  # type: ignore
-            full_qpos_1 = np.concatenate([arm_qpos_1, gripper_qpos_1])  # type: ignore
-
             action_chunk = f["actions"][start_t:end_t]  # type: ignore
 
         scene_tensor = (
@@ -82,17 +75,16 @@ class UR5eDiffusionDataset(Dataset):
         wrist_tensor = (
             torch.from_numpy(np.stack([wrist_img_0, wrist_img_1])).float() / 255.0
         )
-        qpos_tensor = torch.from_numpy(np.stack([full_qpos_0, full_qpos_1])).float()
+        qpos_tensor = torch.from_numpy(np.stack([arm_qpos_0, arm_qpos_1])).float()  # type: ignore
         action_tensor = torch.from_numpy(action_chunk).float()
 
         # normalize the qpos tensors (not the gripper)
-        qpos_tensor[:, :6] = qpos_tensor[:, :6] / 3.1415
-        qpos_tensor[:, 6] = ((qpos_tensor[:, 6] / 0.824) * 2.0) - 1.0
+        qpos_tensor = qpos_tensor / 3.1415
+        # qpos_tensor[:, 6] = ((qpos_tensor[:, 6] / 0.824) * 2.0) - 1.0
         # When gripper closes, the value of right joint is 0.824 max
 
         # normalize the action chunk
-        action_tensor[:, :6] = action_tensor[:, :6] / 3.1415  # for the taregt arm qpos
-        action_tensor[:, 6] = (action_tensor[:, 6] * 2.0) - 1.0  # for the gripper
+        action_tensor = action_tensor / 3.1415  # for the taregt arm qpos
 
         # --- NEW: Apply the Resize & Jitter transforms ---
         scene_tensor = self.image_transforms(scene_tensor)
