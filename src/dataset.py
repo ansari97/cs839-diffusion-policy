@@ -17,6 +17,9 @@ class UR5eDiffusionDataset(Dataset):
         if num_episodes is not None:
             self.episode_files = self.episode_files[:num_episodes]
             print(f"DEBUG MODE: Only loading {num_episodes} episode(s)...")
+
+            if num_episodes == 1:
+                print(f"file name: {self.episode_files[0]}")
         else:
             print(f"Loading all {len(self.episode_files)} episodes...")
 
@@ -50,32 +53,41 @@ class UR5eDiffusionDataset(Dataset):
         end_t = start_t + self.chunk_size
 
         with h5py.File(ep_path, "r") as f:
-            scene_img = f["observations/images/scene_cam"][start_t]  # type: ignore
-            wrist_img = f["observations/images/gripper_cam"][start_t]  # type: ignore
+            # Get t-1 and t indices (duplicate t=0 if we are at the very start)
+            idx_0 = max(0, start_t - 1)
+            idx_1 = start_t
+
+            scene_img_0 = np.moveaxis(f["observations/images/scene_cam"][idx_0], -1, 0)  # type: ignore
+            scene_img_1 = np.moveaxis(f["observations/images/scene_cam"][idx_1], -1, 0)  # type: ignore
+
+            wrist_img_0 = np.moveaxis(f["observations/images/gripper_cam"][idx_0], -1, 0)  # type: ignore
+            wrist_img_1 = np.moveaxis(f["observations/images/gripper_cam"][idx_1], -1, 0)  # type: ignore
 
             # --- NEW: Extract BOTH the arm and the gripper ---
-            arm_qpos = f["observations/qpos"][start_t]  # type: ignore
-            gripper_qpos = f["observations/gripper_qpos"][start_t]  # type: ignore
+            arm_qpos_0 = f["observations/qpos"][idx_0]  # type: ignore
+            arm_qpos_1 = f["observations/qpos"][idx_1]  # type: ignore
+
+            gripper_qpos_0 = f["observations/gripper_qpos"][idx_0]  # type: ignore
+            gripper_qpos_1 = f["observations/gripper_qpos"][idx_1]  # type: ignore
 
             # Glue them together into a single 7-number array!
-            full_qpos = np.concatenate([arm_qpos, gripper_qpos])  # type: ignore
+            full_qpos_0 = np.concatenate([arm_qpos_0, gripper_qpos_0])  # type: ignore
+            full_qpos_1 = np.concatenate([arm_qpos_1, gripper_qpos_1])  # type: ignore
 
             action_chunk = f["actions"][start_t:end_t]  # type: ignore
 
-            # OpenCV has HxWx3, Pytorch requires 3xWxH
-            scene_img = np.moveaxis(scene_img, -1, 0)  # type: ignore
-            wrist_img = np.moveaxis(wrist_img, -1, 0)  # type: ignore
-
-        scene_tensor = torch.from_numpy(scene_img).float() / 255.0
-        wrist_tensor = torch.from_numpy(wrist_img).float() / 255.0
-
-        # Pass the newly combined 7-number state
-        qpos_tensor = torch.from_numpy(full_qpos).float()
+        scene_tensor = (
+            torch.from_numpy(np.stack([scene_img_0, scene_img_1])).float() / 255.0
+        )
+        wrist_tensor = (
+            torch.from_numpy(np.stack([wrist_img_0, wrist_img_1])).float() / 255.0
+        )
+        qpos_tensor = torch.from_numpy(np.stack([full_qpos_0, full_qpos_1])).float()
         action_tensor = torch.from_numpy(action_chunk).float()
 
         # normalize the qpos tensors (not the gripper)
-        qpos_tensor[:6] = qpos_tensor[:6] / 3.1415
-        qpos_tensor[6] = ((qpos_tensor[6] / 0.824) * 2.0) - 1.0
+        qpos_tensor[:, :6] = qpos_tensor[:, :6] / 3.1415
+        qpos_tensor[:, 6] = ((qpos_tensor[:, 6] / 0.824) * 2.0) - 1.0
         # When gripper closes, the value of right joint is 0.824 max
 
         # normalize the action chunk

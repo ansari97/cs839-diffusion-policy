@@ -31,7 +31,7 @@ XML_PATH = PROJECT_ROOT + "/assets/main_scene.xml"
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)  # Creates the folder if it doesn't exist
 
-hdf5_filename = "episode_0.hdf5"
+hdf5_filename = "episode_1.hdf5"
 ep_path = os.path.join(DATA_DIR, hdf5_filename)
 
 
@@ -132,9 +132,9 @@ epochs = []
 
 # Scan through files to find the vision encoder checkpoints
 for f in ckpt_files:
-    if f.startswith("vision_encoder_ep") and f.endswith(".pth"):
+    if f.startswith("scene_encoder_ep") and f.endswith(".pth"):
         # Strip away the text to leave just the number (e.g., "vision_encoder_ep100.pth" -> "100")
-        ep_num_str = f.replace("vision_encoder_ep", "").replace(".pth", "")
+        ep_num_str = f.replace("scene_encoder_ep", "").replace(".pth", "")
         try:
             epochs.append(int(ep_num_str))
         except ValueError:
@@ -149,19 +149,26 @@ print(f"Found checkpoints! Automatically loading Epoch {highest_epoch}...")
 
 
 # 1. Load Vision Encoder
-vision_encoder = VisionEncoder().to(device)
-vision_encoder.load_state_dict(
-    torch.load(
-        os.path.join(ckpt_dir, f"vision_encoder_ep{highest_epoch}.pth"),
-        weights_only=True,
-    )
+scene_encoder = VisionEncoder().to(device)
+wrist_encoder = VisionEncoder().to(device)
+
+scene_path = os.path.join(ckpt_dir, f"scene_encoder_ep{highest_epoch}.pth")
+wrist_path = os.path.join(ckpt_dir, f"wrist_encoder_ep{highest_epoch}.pth")
+
+# Load the saved dictionaries into the models
+scene_encoder.load_state_dict(
+    torch.load(scene_path, weights_only=True, map_location=device)
 )
-vision_encoder.eval()
+wrist_encoder.load_state_dict(
+    torch.load(wrist_path, weights_only=True, map_location=device)
+)
+scene_encoder.eval()
+wrist_encoder.eval()
 
 # 2. Load U-Net
 noise_pred_net = UNet1DModel(
     sample_size=32,  # <-- Make sure this is 32
-    in_channels=142,
+    in_channels=277,
     out_channels=7,
     down_block_types=("DownBlock1D", "DownBlock1D"),
     up_block_types=("UpBlock1D", "UpBlock1D"),
@@ -169,7 +176,7 @@ noise_pred_net = UNet1DModel(
 ).to(device)
 noise_pred_net.load_state_dict(
     torch.load(
-        os.path.join(ckpt_dir, f"noise_pred_net_ep{highest_epoch}.pth"),
+        os.path.join(ckpt_dir, f"unet_ep{highest_epoch}.pth"),
         weights_only=True,
     )
 )
@@ -188,6 +195,10 @@ print("Starting simulation!")
 t = 0
 
 MAX_TIME = 30  # seconds
+
+prev_scene_tensor = None
+prev_wrist_tensor = None
+prev_qpos_tensor = None
 
 with mujoco.viewer.launch_passive(
     model, data, show_left_ui=False, show_right_ui=False
@@ -227,15 +238,30 @@ with mujoco.viewer.launch_passive(
         scene_tensor = resize_transform(scene_tensor)
         wrist_tensor = resize_transform(wrist_tensor)
 
+        if prev_scene_tensor is None:
+            prev_scene_tensor = scene_tensor.clone()
+            prev_wrist_tensor = wrist_tensor.clone()
+            prev_qpos_tensor = robot_qpos.clone()
+
         # pass scene and wrist tensors through the CNN
         with torch.no_grad():
-            scene_features = vision_encoder(scene_tensor)
-            wrist_features = vision_encoder(wrist_tensor)
+            scene_feat_0 = scene_encoder(prev_scene_tensor)
+            scene_feat_1 = scene_encoder(scene_tensor)
+            wrist_feat_0 = wrist_encoder(prev_wrist_tensor)
+            wrist_feat_1 = wrist_encoder(wrist_tensor)
 
         # concatenate to form global condition
         global_condition = torch.cat(
-            [scene_features, wrist_features, robot_qpos], dim=1
-        )
+            [
+                scene_feat_0,
+                scene_feat_1,
+                wrist_feat_0,
+                wrist_feat_1,
+                prev_qpos_tensor,
+                robot_qpos,
+            ],
+            dim=1,
+        )  # type: ignore
         # broadcast condition for 64 steps ahead
         global_condition = global_condition.unsqueeze(-1).repeat(1, 1, 32)
 
@@ -268,7 +294,7 @@ with mujoco.viewer.launch_passive(
 
         # ACTION CHUNKING: We generated 64 steps, but let's only execute the first 8
         # before we stop and take a new picture!
-        action_chunk = clean_actions.copy()
+        action_chunk = clean_actions[:8]
 
         # normalize
         action_chunk[:, :6] = action_chunk[:, :6] * 3.1415
@@ -302,6 +328,10 @@ with mujoco.viewer.launch_passive(
 
             # if cv2.waitKey(1) & 0xFF == ord("q"):
             #     break
+
+        prev_scene_tensor = scene_tensor.clone()
+        prev_wrist_tensor = wrist_tensor.clone()
+        prev_qpos_tensor = robot_qpos.clone()
 
     # loop end
 
