@@ -47,6 +47,11 @@ class VisionEncoder(nn.Module):
 
 def train():
     print("Initializing device...")
+
+    action_chunk_size = 32
+
+    print(f"Action chunk size: {action_chunk_size}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -59,7 +64,9 @@ def train():
 
     print("Loading Dataset...")
     dataset = UR5eDiffusionDataset(
-        data_dir=target_data_dir, chunk_size=32, num_episodes=1  # <--- CHANGE TO 32
+        data_dir=target_data_dir,
+        chunk_size=action_chunk_size,
+        num_episodes=None,
     )
 
     # FIX: Drastically lowered batch size from 64 to 4
@@ -77,10 +84,9 @@ def train():
     scene_encoder = VisionEncoder().to(device)
     wrist_encoder = VisionEncoder().to(device)
 
-    # THE FIX: Tell the U-Net to expect 64 steps instead of 16
-    # Set sample_size back to 16
+    # Set sample_size back to action_chunk_size
     noise_pred_net = UNet1DModel(
-        sample_size=32,
+        sample_size=action_chunk_size,
         in_channels=274,
         out_channels=6,
         down_block_types=("DownBlock1D", "DownBlock1D"),
@@ -145,10 +151,12 @@ def train():
             wrist_img = batch["condition"]["wrist_cam"].to(device)
             qpos = batch["condition"]["qpos"].to(device)
 
-            # Extract actions -> Shape: [Batch, 16 (Sequence), 7 (Channels)]
+            # Extract actions -> Shape: [Batch, action_chunk_size (Sequence), 7 (Channels)]
             # Extract actions and fix dimensions
             clean_actions = batch["action_chunk"].to(device)
-            clean_actions = clean_actions.transpose(1, 2)  # Shape: [Batch, 7, 16]
+            clean_actions = clean_actions.transpose(
+                1, 2
+            )  # Shape: [Batch, 7, action_chunk_size]
 
             scene_t_minus_1, scene_t = scene_img[:, 0], scene_img[:, 1]
             wrist_t_minus_1, wrist_t = wrist_img[:, 0], wrist_img[:, 1]
@@ -173,10 +181,12 @@ def train():
                 dim=1,
             )
 
-            # 4. Stretch to 32 steps
-            global_condition = global_condition.unsqueeze(-1).repeat(1, 1, 32)
+            # 4. Stretch to action_chunk_size steps
+            global_condition = global_condition.unsqueeze(-1).repeat(
+                1, 1, action_chunk_size
+            )
 
-            # 4. Generate noise for exactly 16 steps
+            # 4. Generate noise for action_chunk_size steps
             noise = torch.randn(clean_actions.shape, device=device)
             bsz = clean_actions.shape[0]
 
@@ -189,7 +199,7 @@ def train():
             # 6. Add noise
             noisy_actions = noise_scheduler.add_noise(clean_actions, noise, timesteps)
 
-            # 7. Concatenate (135 condition + 7 action = 142 channels)
+            # 7. Concatenate
             net_input = torch.cat([noisy_actions, global_condition], dim=1)
 
             # 8. Predict the CLEAN actions (x_0), not the noise!

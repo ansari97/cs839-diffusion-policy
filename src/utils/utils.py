@@ -314,3 +314,10 @@ def gripper_cmd(model, data, cmd):
         data.ctrl[6] = 0
     if cmd == 1:
         data.ctrl[6] = 100
+
+
+def taskSuccess(current_ee_position, arm_goal_pos, cube_side):
+    # print(current_ee_position)
+    # print(arm_goal_pos)
+    # print(cube_side)
+    return all(abs(current_ee_position - arm_goal_pos) < cube_side)

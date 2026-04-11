@@ -64,7 +64,7 @@ arm_init_qpos = np.array([0.314, -2.95, 1.35, -0.691, -1.45, 0])
 # gripper open config
 gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
-total_episodes = 100
+total_episodes = 50
 episode_iter = 0
 
 while episode_iter < total_episodes:
@@ -112,7 +112,7 @@ while episode_iter < total_episodes:
     arm_goal_pos = greenzone_cyl_init_pos.copy()
     arm_goal_pos[2] += GREENZONE_CYL_HALF_HEIGHT + 0.10  # 10cm above the target zone
 
-    # we create a cube of 5cm and accept anything within that sphere
+    # we create a cube of 10cm and accept anything within that sphere
     cube_side = 0.05
     greenzone_allowance_cube = np.random.uniform(0, cube_side, size=3)
 
@@ -160,7 +160,12 @@ while episode_iter < total_episodes:
         print("no path returned!")
         continue
 
-    # print(init_to_goal_traj)
+    # pad the trajectory and add 16 mmore instances of same config
+    pad_steps = 16
+    np.pad(init_to_goal_traj, pad_width=((0, pad_steps), (0, 0)), mode="edge")
+
+    print(init_to_goal_traj)
+    print(init_to_goal_traj.shape)
     # input()
 
     # print(init_to_goal_traj.shape)

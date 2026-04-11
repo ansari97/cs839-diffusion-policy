@@ -7,7 +7,7 @@ from torchvision import transforms
 
 
 class UR5eDiffusionDataset(Dataset):
-    def __init__(self, data_dir, chunk_size=16, num_episodes=None):
+    def __init__(self, data_dir, chunk_size=32, num_episodes=None):
         self.data_dir = data_dir
         self.chunk_size = chunk_size
         self.episode_files = [f for f in os.listdir(data_dir) if f.endswith(".hdf5")]

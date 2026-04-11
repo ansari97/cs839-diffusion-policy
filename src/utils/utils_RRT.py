@@ -43,7 +43,7 @@ def PathPlanning(model, data, joints, init_qpos, goal_qpos, goal_biasing_probabi
     dof = len(waypoints[0])
     traj_generator = mjpl.RuckigTrajectoryGenerator(
         dt=model.opt.timestep,
-        max_velocity=np.ones(dof) * np.pi,
+        max_velocity=np.ones(dof) * 0.1 * np.pi,
         max_acceleration=np.ones(dof) * 0.5 * np.pi,
         max_jerk=np.ones(dof),
     )

@@ -51,12 +51,12 @@
       <geom name="table_top" type="box" size="0.7 0.7 0.025" rgba="0.6 0.5 0.4 1" />
     </body>
 
-    <body name="target_ball" pos="0.5 0.1 0.04">
+    <!-- <body name="target_ball" pos="0.5 0.1 0.04">
       <freejoint />
       <geom name="ball_geom" type="sphere" size="0.03" rgba="1 0 0 1" mass="0.01" />
-    </body>
+    </body> -->
 
-    <body name="bin" pos="0.0 0.8 0.0">
+    <!-- <body name="bin" pos="0.0 0.8 0.0">
       <geom name="bin_bottom" type="box" size="0.075 0.075 0.01"
         rgba="0.1 0.8 0.1 1.0" pos="0 0 0.01" />
 
@@ -74,7 +74,23 @@
 
       <site name="bin_top_center" pos="0 0 0.17" rgba="0 0 0 0" />
 
+    </body> -->
+
+    <body name="target_mocap" pos="0.5 0.5 0.02" mocap="true">
+      <geom name="green_zone_cyl" type="cylinder" size="0.1 0.02" rgba="0.1 0.8 0.1 1.0" />
+
+      <site name="success_zone" pos="0 0 0.12" type="box" size="0.08 0.08 0.08"
+        rgba="0.5 0.5 0.5 0.3" />
     </body>
+
+
+    <!-- <body name="obstacle_1" pos="0.2 0.3 0.2">
+      <geom name="obs1_box" type="box" size="0.05 0.08 0.04" rgba="1 0.2 0.2 1.0" />
+    </body> -->
+
+    <!-- <body name="obstacle_2" pos="0.2 0.2 0.6">
+      <geom name="obs2_box" type="box" size="0.05 0.03 0.05" rgba="1 0.2 0.2 1.0" />
+    </body> -->
 
   </worldbody>
 </mujoco>
