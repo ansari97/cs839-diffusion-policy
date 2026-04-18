@@ -84,9 +84,9 @@
     </body>
 
 
-    <!-- <body name="obstacle_1" pos="0.20 0.20 0.3">
+    <body name="obstacle_1" pos="0.20 0.20 0.3">
       <geom name="obs1_box" type="box" size="0.05 0.08 0.04" rgba="1 0.2 0.2 1.0" />
-    </body> -->
+    </body>
 
     <!-- <body name="obstacle_2" pos="0.2 0.2 0.6">
       <geom name="obs2_box" type="box" size="0.05 0.03 0.05" rgba="1 0.2 0.2 1.0" />
