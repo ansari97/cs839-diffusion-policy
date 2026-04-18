@@ -266,7 +266,7 @@ def UR5eIK(
 
         IK_iter += 1
 
-        if IK_iter > 50000:
+        if IK_iter > 10000:
             print("ERROR: couldn't converge :(")
             return None
 

@@ -6,12 +6,24 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
+def normalize(x, x_min, x_max):
+    """Map from [min, max] to [-1, 1]"""
+    return 2 * (x - x_min) / (x_max - x_min) - 1
+
+
 class UR5eDiffusionDataset(Dataset):
     def __init__(self, data_dir, chunk_size=32, num_episodes=None):
         self.data_dir = data_dir
         self.chunk_size = chunk_size
         self.episode_files = [f for f in os.listdir(data_dir) if f.endswith(".hdf5")]
         self.episode_files.sort()
+
+        stats_path = os.path.join(data_dir, "norm_stats.npz")
+        stats = np.load(stats_path)
+        self.qpos_min = torch.from_numpy(stats["qpos_min"]).float()
+        self.qpos_max = torch.from_numpy(stats["qpos_max"]).float()
+        self.action_min = torch.from_numpy(stats["action_min"]).float()
+        self.action_max = torch.from_numpy(stats["action_max"]).float()
 
         # Slice the list if we only want a specific number of files
         if num_episodes is not None:
@@ -78,15 +90,13 @@ class UR5eDiffusionDataset(Dataset):
         qpos_tensor = torch.from_numpy(np.stack([arm_qpos_0, arm_qpos_1])).float()  # type: ignore
         action_tensor = torch.from_numpy(action_chunk).float()
 
-        # normalize the qpos tensors (not the gripper)
-        qpos_tensor = qpos_tensor / 3.1415
-        # qpos_tensor[:, 6] = ((qpos_tensor[:, 6] / 0.824) * 2.0) - 1.0
-        # When gripper closes, the value of right joint is 0.824 max
+        # Normalize qpos per-dimension to [-1, 1]
+        qpos_tensor = normalize(qpos_tensor, self.qpos_min, self.qpos_max)
 
-        # normalize the action chunk
-        action_tensor = action_tensor / 3.1415  # for the taregt arm qpos
+        # Normalize actions per-dimension to [-1, 1]
+        action_tensor = normalize(action_tensor, self.action_min, self.action_max)
 
-        # --- NEW: Apply the Resize & Jitter transforms ---
+        # --- NEW: Apply the Resize transforms ---
         scene_tensor = self.image_transforms(scene_tensor)
         wrist_tensor = self.image_transforms(wrist_tensor)
 

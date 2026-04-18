@@ -16,12 +16,33 @@ import h5py
 
 import time
 
+training_with = input("Train with obs? (y/n)")
+
+if training_with == "y" or training_with == "Y":
+    training_with = "with_obstacles"
+else:
+    training_with = "no_obstacles"
+
+print(f"Training: {training_with}...")
+
 # directories
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-XML_PATH = PROJECT_ROOT + "/assets/main_scene.xml"
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-os.makedirs(DATA_DIR, exist_ok=True)  # Creates the folder if it doesn't exist
 
+if training_with == "no_obstacles":
+    XML_filename = "main_scene.xml"
+elif training_with == "with_obstacles":
+    XML_filename = "main_scene_obs.xml"
+else:
+    print("incorrect training_with selection")
+    while 1:
+        pass
+
+XML_PATH = PROJECT_ROOT + "/assets/" + XML_filename  # type: ignore
+
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+DATA_DIR = os.path.join(DATA_DIR, training_with)
+
+os.makedirs(DATA_DIR, exist_ok=True)  # Creates the folder if it doesn't exist
 
 # Load the UR5e model
 model = mujoco.MjModel.from_xml_path(XML_PATH)
@@ -43,10 +64,13 @@ STEPS_PER_RECORD = SIM_HZ // DATA_HZ  # Every 10 steps
 SCENE_CAM_NAME = "scene_camera"
 WRIST_CAM_NAME = "wrist_camera"
 
-# constants
+# IDs
 greenzone_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "green_zone")
 greenzone_geom_id = model.geom("green_zone_cyl").id
 GREENZONE_CYL_HALF_HEIGHT = model.geom_size[greenzone_geom_id][1]
+
+mocap_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "target_mocap")
+mocap_id = model.body_mocapid[mocap_body_id]  # Translates Body ID (23) to Mocap ID (0)
 
 # arm parameters
 arm_ndof = 6
@@ -58,21 +82,21 @@ arm_home_qpos = np.array([-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0])
 
 # arm actual initial position
 arm_init_qpos = np.array([0.314, -2.95, 1.35, -0.691, -1.45, 0])
-# np.array([0.7, -0.0, -2.43, -1.2, 1.5708, 3.1415])
-# np.array([0.7, -np.pi / 4, -2.43, -0.34, np.pi / 2, np.pi])
 
 # gripper open config
 gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
-total_episodes = 50
-episode_iter = 0
+total_episodes = 200
+start_episode = 0
+episode_iter = start_episode
+
 
 while episode_iter < total_episodes:
 
     # reset model
     mujoco.mj_resetData(model, data)
 
-    # data storage buffers
+    # reset data storage buffers
     obs_scene_imgs = []
     obs_wrist_imgs = []
     obs_qpos = []
@@ -80,24 +104,18 @@ while episode_iter < total_episodes:
     actions = []
 
     # randomize greenzone position
-    x = np.random.uniform(0.2, 0.75)
-    y = np.random.uniform(0.2, 0.75)
+    x = np.random.uniform(0.2, 0.5)
+    y = np.random.uniform(0.4, 0.5)
     greenzone_cyl_init_pos = np.array([x, y, GREENZONE_CYL_HALF_HEIGHT])
 
     print(f"episode: {episode_iter}")
     print(f"target zone init pos: {greenzone_cyl_init_pos}")
 
-    # ball initial orientation
-    # greenzone_cyl_init_quat = np.array([1, 0, 0, 0])
-    # greenzone_init_qpos = np.concatenate(
-    #     (greenzone_cyl_init_pos, greenzone_cyl_init_quat)
-    # )
-
     # initial world config
     init_qpos = np.concatenate((arm_init_qpos, gripper_open_qpos))
 
     # assign to initial position of the simulator
-    model.body_pos[greenzone_body_id] = greenzone_cyl_init_pos
+    data.mocap_pos[mocap_id] = greenzone_cyl_init_pos
     data.qpos = init_qpos
     mujoco.mj_forward(model, data)
 
@@ -105,20 +123,18 @@ while episode_iter < total_episodes:
     jacp = np.zeros((3, model.nv))
     jacr = np.zeros((3, model.nv))
 
-    # ----------------------------------------
     ## inverse kinematics for the ball position
-
     # goal position
     arm_goal_pos = greenzone_cyl_init_pos.copy()
     arm_goal_pos[2] += GREENZONE_CYL_HALF_HEIGHT + 0.10  # 10cm above the target zone
 
     # we create a cube of 10cm and accept anything within that sphere
     cube_side = 0.05
-    greenzone_allowance_cube = np.random.uniform(0, cube_side, size=3)
+    greenzone_allowance_cube = np.random.uniform(-cube_side, cube_side, size=3)
 
     arm_goal_pos += greenzone_allowance_cube
 
-    # we can also randomize this to be between 0 and 10cm
+    # ee orientation
     arm_goal_rot_wrt_global = np.array(
         [
             [1, 0, 0],
@@ -127,6 +143,7 @@ while episode_iter < total_episodes:
         ]
     )
 
+    # IK
     arm_goal_qpos = UR5eIK(
         model,
         data,
@@ -140,6 +157,7 @@ while episode_iter < total_episodes:
         print("IK failed!")
         continue
 
+    # for RRT
     joints = [
         "shoulder_pan_joint",
         "shoulder_lift_joint",
@@ -160,114 +178,126 @@ while episode_iter < total_episodes:
         print("no path returned!")
         continue
 
-    # pad the trajectory and add 16 mmore instances of same config
+    # pad the trajectory and add 16 mmore instances of same config so that planner stops at end position
     pad_steps = 16
     np.pad(init_to_goal_traj, pad_width=((0, pad_steps), (0, 0)), mode="edge")
 
-    print(init_to_goal_traj)
-    print(init_to_goal_traj.shape)
+    # print(init_to_goal_traj)
+    print(f"Path waypoints: {init_to_goal_traj.shape}")  # type: ignore
     # input()
 
     # print(init_to_goal_traj.shape)
 
-    print("Starting simulation!")
+    print(f"Starting simulation for episode: {episode_iter}!")
     t = 0
     step_counter = 0
 
-    # with mujoco.viewer.launch_passive(
-    #     model, data, show_left_ui=False, show_right_ui=False
-    # ) as viewer:
-    #     viewer.sync()
+    with mujoco.viewer.launch_passive(  # type: ignore
+        model, data, show_left_ui=False, show_right_ui=False
+    ) as viewer:
+        viewer.sync()
 
-    for traj in init_to_goal_traj:
-        target_arm_qpos = traj[:arm_ndof]
-        target_gripper_qpos = 0
+        for traj in init_to_goal_traj:  # type: ignore
+            target_arm_qpos = traj[:arm_ndof]
+            target_gripper_qpos = 0
 
-        if step_counter % STEPS_PER_RECORD == 0:
-            # Render Scene Camera
-            renderer.update_scene(data, camera=SCENE_CAM_NAME)
-            scene_img = renderer.render()  # Returns RGB numpy array
+            if step_counter % STEPS_PER_RECORD == 0:
+                # Render Scene Camera
+                renderer.update_scene(data, camera=SCENE_CAM_NAME)
+                scene_img = renderer.render()  # Returns RGB numpy array
 
-            # Render Gripper Camera
-            renderer.update_scene(data, camera=WRIST_CAM_NAME)
-            wrist_img = renderer.render()  # Returns RGB numpy array
+                # Render Gripper Camera
+                renderer.update_scene(data, camera=WRIST_CAM_NAME)
+                wrist_img = renderer.render()  # Returns RGB numpy array
 
-            # Get physical states
-            current_qpos = data.qpos[:arm_ndof].copy()
+                # Get physical states
+                current_qpos = data.qpos[:arm_ndof].copy()
 
-            # Save Action (what we commanded at this step)
-            current_action = target_arm_qpos.copy()
+                # Save Action (what we commanded at this step)
+                current_action = target_arm_qpos.copy()
 
-            # Append to buffers
-            obs_scene_imgs.append(scene_img)
-            obs_wrist_imgs.append(wrist_img)
-            obs_qpos.append(current_qpos)
-            actions.append(current_action)
+                # Append to buffers
+                obs_scene_imgs.append(scene_img)
+                obs_wrist_imgs.append(wrist_img)
+                obs_qpos.append(current_qpos)
+                actions.append(current_action)
 
-            # live monitor
-            cv2.imshow("Scene Camera", cv2.cvtColor(scene_img, cv2.COLOR_RGB2BGR))
-            cv2.imshow("Wrist Camera", cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR))
+                # # live monitor
+                # cv2.imshow("Scene Camera", cv2.cvtColor(scene_img, cv2.COLOR_RGB2BGR))
+                # cv2.imshow("Wrist Camera", cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR))
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+                # if cv2.waitKey(1) & 0xFF == ord("q"):
+                #     break
 
-        if np.random.rand() < 0.10:
-            # Create a small noise vector (e.g., +/- 0.02 radians)
-            noise = np.random.uniform(-0.02, 0.02, size=arm_ndof)
-            noisy_qpos = target_arm_qpos + noise
+            if np.random.rand() < 0.10:
+                # Create a small noise vector (e.g., +/- 0.02 radians)
+                noise = np.random.uniform(-0.02, 0.02, size=arm_ndof)
+                noisy_qpos = target_arm_qpos + noise
 
-            # Send the noisy command to the physics engine
-            data.ctrl[:arm_ndof] = noisy_qpos
-        else:
-            # Send the perfect command
-            data.ctrl[:arm_ndof] = target_arm_qpos
+                # Send the noisy command to the physics engine
+                data.ctrl[:arm_ndof] = noisy_qpos
+            else:
+                # Send the perfect command
+                data.ctrl[:arm_ndof] = target_arm_qpos
 
-        data.ctrl[arm_ndof:gripper_ndof] = target_gripper_qpos
+            # single action for the gripper
+            data.ctrl[arm_ndof:gripper_ndof] = target_gripper_qpos
 
-        mujoco.mj_step(model, data)
-        # viewer.sync()
+            mujoco.mj_step(model, data)
+            viewer.sync()
 
-        t += TIMESTEP
-        step_counter += 1
-        # time.sleep(0.01)
+            t += TIMESTEP
+            step_counter += 1
+            # time.sleep(0.01)
 
-    # Cleanup OpenCV windows
-    cv2.destroyAllWindows()
+        # Cleanup OpenCV windows
+        cv2.destroyAllWindows()
 
-    print("Simulation complete!")
-    # input()
+        print("Simulation complete!")
+        save_sim = input("Save simulation?")
+        # input()
 
-    HDF5_NAME = "episode_" + str(episode_iter) + ".hdf5"
-    HDF5_PATH = os.path.join(DATA_DIR, HDF5_NAME)
+        if save_sim == "n":
+            continue
 
-    with h5py.File(HDF5_PATH, "w") as f:
-        # Create the observations group
-        obs_grp = f.create_group("observations")
-        img_grp = obs_grp.create_group("images")
+        HDF5_NAME = "episode_" + str(episode_iter) + ".hdf5"
+        HDF5_PATH = os.path.join(DATA_DIR, HDF5_NAME)
 
-        # Save Images (Using uint8 compression to save massive amounts of disk space)
-        img_grp.create_dataset(
-            "scene_cam",
-            data=np.array(obs_scene_imgs),
-            dtype="uint8",
-            compression="gzip",
-        )
-        img_grp.create_dataset(
-            "gripper_cam",
-            data=np.array(obs_wrist_imgs),
-            dtype="uint8",
-            compression="gzip",
-        )
+        with h5py.File(HDF5_PATH, "w") as f:
+            # Create the observations group
+            training_with_ds = f.create_dataset(
+                "training_with",
+                data=training_with,
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
+            obs_grp = f.create_group("observations")
+            img_grp = obs_grp.create_group("images")
 
-        # Save States (float32 is standard for policy inputs)
-        obs_grp.create_dataset("qpos", data=np.array(obs_qpos), dtype="float32")
+            # Save Images (Using uint8 compression to save massive amounts of disk space)
+            img_grp.create_dataset(
+                "scene_cam",
+                data=np.array(obs_scene_imgs),
+                dtype="uint8",
+                compression="gzip",
+            )
+            img_grp.create_dataset(
+                "gripper_cam",
+                data=np.array(obs_wrist_imgs),
+                dtype="uint8",
+                compression="gzip",
+            )
 
-        # Save Actions
-        f.create_dataset("actions", data=np.array(actions), dtype="float32")
+            # Save States (float32 is standard for policy inputs)
+            obs_grp.create_dataset("qpos", data=np.array(obs_qpos), dtype="float32")
 
-        # Save ball init position and quaternion
-        f.create_dataset("greenzone_cyl_init_pos", data=greenzone_cyl_init_pos)
+            # Save Actions
+            f.create_dataset("actions", data=np.array(actions), dtype="float32")
+
+            # Save ball init position and quaternion
+            f.create_dataset("greenzone_cyl_init_pos", data=greenzone_cyl_init_pos)
 
     episode_iter += 1
+
+    viewer.close()
 
 renderer.close()
