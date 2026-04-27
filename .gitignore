@@ -6,6 +6,7 @@
 /data
 /checkpoints
 /docs
+/video_data
 
 **.pyc
 /__pycache__
