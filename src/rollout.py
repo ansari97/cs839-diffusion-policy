@@ -57,22 +57,31 @@ class NoOpViewer:
         pass
 
 
+RECORD_FOR_VIDEO = True
+RECORD_TARGET = {
+    "xml_scene": "with_obstacles",  # 'no_obstacles' or 'with_obstacles'
+    "occlusions": True,  # bool
+    "policy": "3",  # '1', '2', or '3'
+    "episode": 0,  # which episode in the cell to record
+}
+
+
 ROLLOUT_LIST = [
-    ["n", "n", "1"],
-    ["y", "n", "1"],
-    ["y", "y", "1"],
-    ["n", "n", "2"],
-    ["y", "n", "2"],
-    ["y", "y", "2"],
-    ["n", "n", "3"],
-    ["y", "n", "3"],
+    # ["n", "n", "1"],
+    # ["y", "n", "1"],
+    # ["y", "y", "1"],
+    # ["n", "n", "2"],
+    # ["y", "n", "2"],
+    # ["y", "y", "2"],
+    # ["n", "n", "3"],
+    # ["y", "n", "3"],
     ["y", "y", "3"],
 ]
 
 ENABLE_VIEWER = False
 
 for xml_scene, scene_with_occlusions_input, training_input in ROLLOUT_LIST:
-    np.random.seed(42)
+    np.random.seed(40)
 
     rollout_episodes = 100
 
@@ -288,6 +297,13 @@ for xml_scene, scene_with_occlusions_input, training_input in ROLLOUT_LIST:
 
     task_success_time_criterion = 2  # seconds
 
+    recording_this_run = (
+        RECORD_FOR_VIDEO
+        and xml_scene == RECORD_TARGET["xml_scene"]
+        and scene_with_occlusions == RECORD_TARGET["occlusions"]
+        and training_input == RECORD_TARGET["policy"]
+    )
+
     for ep in range(rollout_episodes):
 
         # Init at episode start
@@ -335,6 +351,16 @@ for xml_scene, scene_with_occlusions_input, training_input in ROLLOUT_LIST:
         jacr = np.zeros((3, model.nv))
 
         print(f"Starting episode {ep}!")
+
+        recording_this_episode = recording_this_run and ep == RECORD_TARGET["episode"]
+        if recording_this_episode:
+            rec_qpos = []
+            rec_scene_frames = []
+            rec_wrist_frames = []
+            rec_plan_starts = []
+            rec_sim_step = 0
+            print(f"  >> RECORDING this episode for video playback")
+
         t = 0
 
         MAX_TIME = 20  # seconds
@@ -406,6 +432,25 @@ for xml_scene, scene_with_occlusions_input, training_input in ROLLOUT_LIST:
                         scene_stacked_tensor[0:1],
                         scene_stacked_tensor[1:2],
                     )
+
+                if recording_this_episode:
+                    rec_scene_frames.append(
+                        (
+                            scene_tensor[0].detach().cpu().numpy().transpose(1, 2, 0)
+                            * 255
+                        )
+                        .clip(0, 255)
+                        .astype(np.uint8)
+                    )
+                    rec_wrist_frames.append(
+                        (
+                            wrist_tensor[0].detach().cpu().numpy().transpose(1, 2, 0)
+                            * 255
+                        )
+                        .clip(0, 255)
+                        .astype(np.uint8)
+                    )
+                    rec_plan_starts.append(rec_sim_step)
 
                 # pass scene and wrist tensors through the CNN
                 with torch.no_grad():
@@ -570,6 +615,11 @@ for xml_scene, scene_with_occlusions_input, training_input in ROLLOUT_LIST:
                     # tertiary_task_successful =
 
                     mujoco.mj_step(model, data)
+
+                    if recording_this_episode:
+                        rec_qpos.append(data.qpos.copy())
+                        rec_sim_step += 1
+
                     t += TIMESTEP
 
                     viewer.sync()
@@ -599,6 +649,34 @@ for xml_scene, scene_with_occlusions_input, training_input in ROLLOUT_LIST:
         print(f"Episode: {ep}; Secondary task success: {secondary_task_successful}")
         print(f"Episode: {ep}; Tertiary task success: {tertiary_task_successful}")
         print(f"Episode: {ep}; Time to completion: {t}")
+
+        if recording_this_episode:
+            video_data_dir = os.path.join(PROJECT_ROOT, "video_data")
+            os.makedirs(video_data_dir, exist_ok=True)
+            out_path = os.path.join(
+                video_data_dir,
+                f"video_{xml_scene}_occ{int(scene_with_occlusions)}_P{training_input}_ep{ep}.npz",
+            )
+            np.savez_compressed(
+                out_path,
+                qpos=np.array(rec_qpos, dtype=np.float64),
+                scene_frames=np.array(rec_scene_frames),
+                wrist_frames=np.array(rec_wrist_frames),
+                plan_starts=np.array(rec_plan_starts, dtype=np.int64),
+                greenzone_pos=np.array(greenzone_cyl_init_pos, dtype=np.float64),
+                goal_pos=np.array(arm_goal_pos, dtype=np.float64),
+                timestep=np.float64(TIMESTEP),
+                xml_scene=xml_scene,
+                scene_with_occlusions=int(scene_with_occlusions),
+                policy_ckpt_direc=policy_ckpt_direc,
+                training_input=training_input,
+                episode_index=int(ep),
+                primary_success=int(primary_task_successful),
+                secondary_success=int(secondary_task_successful),
+                tertiary_success=int(tertiary_task_successful),
+            )
+            print(f"  >> Saved video recording: {out_path}")
+
         # viewer.close()
 
     renderer.close()

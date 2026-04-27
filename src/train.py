@@ -88,7 +88,10 @@ class VisionEncoder(nn.Module):
         return self.spatial_softmax(feat_map)  # [B, 128]
 
 
-def train(training_with):
+def train(training_with, train_with_occlusions):
+
+    print(f"Training: {training_with}, Occlusions: {train_with_occlusions}")
+
     print("Initializing device...")
 
     print(f"Action chunk size: {action_chunk_size}")
@@ -105,7 +108,12 @@ def train(training_with):
 
     # --- ADD THIS ---
     ckpt_dir = os.path.join(current_dir, "..", "checkpoints")
-    ckpt_dir = os.path.join(ckpt_dir, training_with)
+
+    if train_with_occlusions:
+        ckpt_dir = os.path.join(ckpt_dir, "occlusions")
+    else:
+        ckpt_dir = os.path.join(ckpt_dir, training_with)
+
     os.makedirs(ckpt_dir, exist_ok=True)
 
     print("Loading Dataset...")
@@ -113,6 +121,8 @@ def train(training_with):
         data_dir=target_data_dir,
         chunk_size=action_chunk_size,
         num_episodes=None,
+        train_with_occlusions=train_with_occlusions,
+        occlusion_prob=0.3,
     )
 
     dataloader = DataLoader(
@@ -143,7 +153,7 @@ def train(training_with):
     )
     noise_pred_net.to(device)  # type: ignore
 
-    print(f"UNet in_channels: {noise_pred_net.config.in_channels}")
+    print(f"UNet in_channels: {noise_pred_net.config.in_channels}")  # type: ignore
 
     # Create EMA wrappers — 0.75 power is the DP paper default
     ema_scene_encoder = EMAModel(parameters=scene_encoder.parameters(), power=0.75)
@@ -165,7 +175,7 @@ def train(training_with):
 
     START_EPOCH = 0  # The epoch you are loading from your previous run
     num_epochs = 200  # Your new target (200 + 300 epochs)
-    RESUME_TRAINING = False
+    RESUME_TRAINING = True
 
     num_training_steps = num_epochs * len(dataloader)  # type: ignore
     lr_scheduler = get_scheduler(
@@ -303,10 +313,10 @@ def train(training_with):
         duration = end_time - start_time
 
         print(
-            f"[Epoch {epoch+1}/{num_epochs}] Finished at {end_clock} | Loss: {epoch_loss:.4f} | LR: {lr_scheduler.get_last_lr()[0]:.2e} | Took: {duration:.2f} seconds"
+            f"[Epoch {epoch+1}/{num_epochs}] Finished at {end_clock} | Loss: {epoch_loss:.6f} | LR: {lr_scheduler.get_last_lr()[0]:.2e} | Took: {duration:.2f} seconds"
         )
 
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 25 == 0:
             ckpt = {
                 "epoch": epoch + 1,
                 "scene_encoder": scene_encoder.state_dict(),
@@ -329,11 +339,19 @@ if __name__ == "__main__":
     # out = enc(img)
     # print(out.shape)  # should print torch.Size([2, 128])
 
+    train_with_occlusions = False
+
     training_with = input("Train with obs? (y/n)")
 
     if training_with == "y" or training_with == "Y":
         training_with = "with_obstacles"
+
+        train_with_occlusions_input = input("Train with occlusions? (y/n)")
+
+        if train_with_occlusions_input == "y" or train_with_occlusions_input == "Y":
+            train_with_occlusions = True
+
     else:
         training_with = "no_obstacles"
 
-    train(training_with)
+    train(training_with, train_with_occlusions)

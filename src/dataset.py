@@ -5,6 +5,8 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+import math, random
+
 
 def normalize(x, x_min, x_max):
     """Map from [min, max] to [-1, 1]"""
@@ -12,11 +14,33 @@ def normalize(x, x_min, x_max):
 
 
 class UR5eDiffusionDataset(Dataset):
-    def __init__(self, data_dir, chunk_size=32, num_episodes=None):
+    def __init__(
+        self,
+        data_dir,
+        chunk_size=32,
+        num_episodes=None,
+        train_with_occlusions=False,
+        occlusion_prob=None,
+    ):
         self.data_dir = data_dir
         self.chunk_size = chunk_size
         self.episode_files = [f for f in os.listdir(data_dir) if f.endswith(".hdf5")]
         self.episode_files.sort()
+
+        self.train_with_occlusions = train_with_occlusions
+
+        if train_with_occlusions:
+            if occlusion_prob is None:
+                raise ValueError(
+                    "train_with_occlusions=True requires occlusion_prob to be set "
+                    "(expected a float in [0, 1], got None)."
+                )
+            if not 0.0 <= occlusion_prob <= 1.0:
+                raise ValueError(
+                    f"occlusion_prob must be in [0, 1], got {occlusion_prob}."
+                )
+
+        self.occlusion_prob = occlusion_prob
 
         stats_path = os.path.join(data_dir, "norm_stats.npz")
         stats = np.load(stats_path)
@@ -96,9 +120,13 @@ class UR5eDiffusionDataset(Dataset):
         # Normalize actions per-dimension to [-1, 1]
         action_tensor = normalize(action_tensor, self.action_min, self.action_max)
 
-        # --- NEW: Apply the Resize transforms ---
+        # Apply the Resize transforms ---
         scene_tensor = self.image_transforms(scene_tensor)
         wrist_tensor = self.image_transforms(wrist_tensor)
+
+        # apply occlusions
+        if self.train_with_occlusions and random.random() < self.occlusion_prob:  # type: ignore
+            scene_tensor = self.pixel_blackening(scene_tensor)
 
         return {
             "condition": {
@@ -108,3 +136,43 @@ class UR5eDiffusionDataset(Dataset):
             },
             "action_chunk": action_tensor,
         }
+
+    @staticmethod
+    def pixel_blackening(img_tensor, area_range=(0.02, 0.20), aspect_range=(0.3, 3.3)):
+        img_H, img_W = img_tensor.shape[-2], img_tensor.shape[-1]
+        img_area = img_H * img_W
+
+        target_area = random.uniform(*area_range) * img_area
+        # log-uniform is standard for aspect ratio so 0.3 and 3.3 are equally likely
+        aspect = math.exp(
+            random.uniform(math.log(aspect_range[0]), math.log(aspect_range[1]))
+        )
+
+        black_W = int(round(math.sqrt(target_area * aspect)))
+        black_H = int(round(math.sqrt(target_area / aspect)))
+
+        # ensure odd
+        if black_W % 2 == 0:
+            black_W -= 1
+
+        if black_H % 2 == 0:
+            black_H -= 1
+
+        # clamp so we don't exceed image dims (happens at extreme aspect ratios)
+        black_W = min(black_W, img_W)
+        black_H = min(black_H, img_H)
+
+        # get random anchor point for the center of the black
+        anchor_x = random.randint(0, img_W - 1)
+        anchor_y = random.randint(0, img_H - 1)
+
+        # ensure
+        lb_x = max(0, anchor_x - int(black_W / 2))
+        ub_x = min(img_W - 1, anchor_x + int(black_W / 2))
+
+        lb_y = max(0, anchor_y - int(black_H / 2))
+        ub_y = min(img_H - 1, anchor_y + int(black_H / 2))
+
+        img_tensor[..., lb_y : ub_y + 1, lb_x : ub_x + 1] = 0
+
+        return img_tensor

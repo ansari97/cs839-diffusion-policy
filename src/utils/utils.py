@@ -316,8 +316,31 @@ def gripper_cmd(model, data, cmd):
         data.ctrl[6] = 100
 
 
-def taskSuccess(current_ee_position, arm_goal_pos, cube_side):
+def primaryTaskSuccess(
+    current_ee_position,
+    arm_goal_pos,
+    cube_side,
+    task_success_time,
+    task_success_time_criterion,
+):
     # print(current_ee_position)
     # print(arm_goal_pos)
     # print(cube_side)
+    # # all(abs(current_ee_position - arm_goal_pos) < cube_side)
+    # and
+    return task_success_time >= task_success_time_criterion
+
+
+def secondaryTaskSuccess(
+    current_ee_position,
+    arm_goal_pos,
+    cube_side,
+    task_success_time,
+    task_success_time_criterion,
+):
+    # print(current_ee_position)
+    # print(arm_goal_pos)
+    # print(cube_side)
+    # #
+    # and
     return all(abs(current_ee_position - arm_goal_pos) < cube_side)

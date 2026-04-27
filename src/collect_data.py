@@ -87,7 +87,7 @@ arm_init_qpos = np.array([0.314, -2.95, 1.35, -0.691, -1.45, 0])
 gripper_open_qpos = np.array([0, 0, 0, 0, 0, 0])
 
 total_episodes = 200
-start_episode = 0
+start_episode = 132
 episode_iter = start_episode
 
 
@@ -128,7 +128,7 @@ while episode_iter < total_episodes:
     arm_goal_pos = greenzone_cyl_init_pos.copy()
     arm_goal_pos[2] += GREENZONE_CYL_HALF_HEIGHT + 0.10  # 10cm above the target zone
 
-    # we create a cube of 10cm and accept anything within that sphere
+    # we create a cube of 10cm and accept anything within that margin
     cube_side = 0.05
     greenzone_allowance_cube = np.random.uniform(-cube_side, cube_side, size=3)
 
