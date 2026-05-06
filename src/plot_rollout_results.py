@@ -1,5 +1,6 @@
 """
-Plot rollout results for the 3x3 experimental matrix.
+Plot rollout results for the 3x3 experimental matrix, with 95% Wilson
+score intervals on every bar.
 
 Reads 9 .mat files produced by rollout.py and produces three grouped bar charts
 forming the success funnel:
@@ -11,12 +12,13 @@ forming the success funnel:
 For each metric, two layouts are produced:
 
   * by_condition : x = test condition, bars = policy
-                   -> "which policy wins in each world"
+                   -> "which policy wins on each task"
   * by_policy    : x = policy,         bars = test condition
                    -> "how each policy degrades as the world gets harder"
 
-Colors  = Okabe-Ito colorblind-safe palette
-Outputs = PNG (web) + PDF (slides) into ./figures
+Error bars: 95% Wilson score intervals (asymmetric in general; safe near 0% / 100%).
+Colors    : Okabe-Ito colorblind-safe palette.
+Outputs   : PNG (web) + PDF (slides) into OUTPUT_DIR.
 """
 
 import os
@@ -24,7 +26,6 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
-
 
 # -------------------------------------------------------------------
 # Config -- edit these two paths if needed
@@ -83,6 +84,45 @@ CONDITION_ORDER = ["no_obstacles_clean", "with_obstacles_clean", "with_obstacles
 
 
 # -------------------------------------------------------------------
+# Statistics
+# -------------------------------------------------------------------
+def wilson_ci(k, n, z=1.96):
+    """Wilson score 95% confidence interval for a binomial proportion.
+
+    Args:
+        k : number of successes
+        n : number of trials
+        z : z-value (1.96 for 95% confidence)
+
+    Returns:
+        (lower, upper) in [0, 1]
+    """
+    if n == 0:
+        return 0.0, 0.0
+    p = k / n
+    denom = 1.0 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denom
+    halfwidth = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / denom
+    return max(0.0, center - halfwidth), min(1.0, center + halfwidth)
+
+
+def cell_stats(arr):
+    """Compute (mean_pct, err_low_pct, err_high_pct) for a 0/1 success array.
+
+    Errors are expressed as distances from the observed mean to the Wilson
+    95% bounds, so they can be passed straight to matplotlib's yerr=[low, up].
+    """
+    arr = np.asarray(arr).astype(float).ravel()
+    n = len(arr)
+    if n == 0:
+        return np.nan, 0.0, 0.0
+    k = int(arr.sum())
+    p = k / n
+    lo, hi = wilson_ci(k, n)
+    return 100.0 * p, 100.0 * (p - lo), 100.0 * (hi - p)
+
+
+# -------------------------------------------------------------------
 # Helpers for getting clean Python scalars out of loadmat() output
 # -------------------------------------------------------------------
 def _as_str(x):
@@ -131,7 +171,7 @@ def parse_mat(path):
 
 
 def collect_results(results_dir):
-    """Build the 3x3 grids of mean success rates (in %)."""
+    """Build 3x3 grids where each cell holds (mean_pct, err_low, err_high)."""
     files = sorted(glob.glob(os.path.join(results_dir, "*.mat")))
     if len(files) != 9:
         print(f"[WARN] expected 9 .mat files in {results_dir}, found {len(files)}")
@@ -144,15 +184,19 @@ def collect_results(results_dir):
     for f in files:
         policy, condition, primary, secondary, tertiary = parse_mat(f)
         n_episodes = len(primary)
-        primary_grid[policy][condition] = 100.0 * primary.mean()
-        secondary_grid[policy][condition] = 100.0 * secondary.mean()
-        tertiary_grid[policy][condition] = 100.0 * tertiary.mean()
+        primary_grid[policy][condition] = cell_stats(primary)
+        secondary_grid[policy][condition] = cell_stats(secondary)
+        tertiary_grid[policy][condition] = cell_stats(tertiary)
+
+        pm, plo, phi = primary_grid[policy][condition]
+        sm, slo, shi = secondary_grid[policy][condition]
+        tm, tlo, thi = tertiary_grid[policy][condition]
         print(
             f"  {os.path.basename(f):<70s}  "
             f"policy={policy:<14s} cond={condition:<22s} "
-            f"P={100*primary.mean():5.1f}%  "
-            f"S={100*secondary.mean():5.1f}%  "
-            f"T={100*tertiary.mean():5.1f}%"
+            f"P={pm:5.1f}% [-{plo:.1f},+{phi:.1f}]  "
+            f"S={sm:5.1f}% [-{slo:.1f},+{shi:.1f}]  "
+            f"T={tm:5.1f}% [-{tlo:.1f},+{thi:.1f}]"
         )
 
     return primary_grid, secondary_grid, tertiary_grid, n_episodes
@@ -161,11 +205,11 @@ def collect_results(results_dir):
 # -------------------------------------------------------------------
 # Generic grouped-bar plotter
 #
-# `grid[policy][condition] = success_rate_percent`
+# `grid[policy][condition] = (mean_pct, err_low_pct, err_high_pct)`
 #
 # `outer_keys`     -> what goes on the x-axis (one cluster per key)
 # `inner_keys`     -> what each cluster contains (one bar per key)
-# `value_lookup`   -> function(outer, inner) -> grid value
+# `value_lookup`   -> function(outer, inner) -> 3-tuple from the grid
 # -------------------------------------------------------------------
 def _plot_grouped_bars(
     outer_keys,
@@ -189,7 +233,11 @@ def _plot_grouped_bars(
     fig, ax = plt.subplots(figsize=(11, 6), dpi=150)
 
     for i, inner in enumerate(inner_keys):
-        heights = [value_lookup(outer, inner) for outer in outer_keys]
+        trios = [value_lookup(outer, inner) for outer in outer_keys]
+        heights = [t[0] for t in trios]
+        yerr_low = [t[1] for t in trios]
+        yerr_up = [t[2] for t in trios]
+
         offset = (i - (n_inner - 1) / 2) * bar_width
         bars = ax.bar(
             x + offset,
@@ -199,13 +247,18 @@ def _plot_grouped_bars(
             edgecolor="black",
             linewidth=0.7,
             label=inner_legend_labels[inner],
+            yerr=[yerr_low, yerr_up],
+            capsize=3,
+            ecolor="#333",
+            error_kw=dict(linewidth=1.1, alpha=0.85, capthick=1.1),
         )
-        for bar, h in zip(bars, heights):
+        # Value labels float above the upper error cap
+        for bar, h, eu in zip(bars, heights, yerr_up):
             if np.isnan(h):
                 continue
             ax.text(
                 bar.get_x() + bar.get_width() / 2.0,
-                h + 1.5,
+                h + eu + 1.5,
                 f"{h:.0f}%",
                 ha="center",
                 va="bottom",
@@ -219,7 +272,7 @@ def _plot_grouped_bars(
     ax.set_xlabel(xlabel, fontsize=13, labelpad=8)
     ax.set_ylabel(ylabel, fontsize=13, labelpad=8)
     ax.set_title(title, fontsize=15, fontweight="bold", pad=14)
-    ax.set_ylim(0, 110)
+    ax.set_ylim(0, 115)  # extra headroom for upper caps + labels
     ax.set_yticks(np.arange(0, 101, 20))
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{int(v)}%"))
     ax.grid(axis="y", linestyle="--", alpha=0.4)
@@ -242,7 +295,7 @@ def _plot_grouped_bars(
         ax.text(
             0.99,
             0.97,
-            f"n = {n_episodes} episodes / cell",
+            f"n = {n_episodes} episodes / cell\nerror bars: 95% Wilson CI",
             transform=ax.transAxes,
             ha="right",
             va="top",
@@ -269,7 +322,7 @@ def plot_by_condition(grid, title, ylabel, save_name, n_episodes):
     _plot_grouped_bars(
         outer_keys=CONDITION_ORDER,
         inner_keys=POLICY_ORDER,
-        value_lookup=lambda cond, policy: grid[policy].get(cond, np.nan),
+        value_lookup=lambda cond, policy: grid[policy].get(cond, (np.nan, 0.0, 0.0)),
         inner_color_map=POLICY_COLORS,
         outer_tick_labels=CONDITION_LABELS_TICK,
         inner_legend_labels=POLICY_LABELS_LEGEND,
@@ -287,7 +340,7 @@ def plot_by_policy(grid, title, ylabel, save_name, n_episodes):
     _plot_grouped_bars(
         outer_keys=POLICY_ORDER,
         inner_keys=CONDITION_ORDER,
-        value_lookup=lambda policy, cond: grid[policy].get(cond, np.nan),
+        value_lookup=lambda policy, cond: grid[policy].get(cond, (np.nan, 0.0, 0.0)),
         inner_color_map=CONDITION_COLORS,
         outer_tick_labels=POLICY_LABELS_TICK,
         inner_legend_labels=CONDITION_LABELS_LEGEND,
@@ -311,7 +364,7 @@ def main():
         (primary_grid, "Primary success: gripper reaches XY zone", "primary_success"),
         (
             secondary_grid,
-            "Secondary success: gripper holds XY zone for \u22651 s",
+            "Secondary success: gripper holds XY zone for ≥1 s",
             "secondary_success",
         ),
         (
